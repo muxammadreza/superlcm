@@ -1,6 +1,7 @@
 import { fitSummary, repairSummaryPrompt } from '../src/summary-fitting.js'
 import { checkedSummary } from '../src/summary-policy.js'
 import {rescueClaude,discardClaudeRescue} from './claude-rescue.js'
+import {noteModule} from '../src/module-health.js'
 // A Claude Code module (2.1.286+), two jobs:
 // 接管压缩: when the main conversation compacts, SuperLcm answers with its own summaries plus the newest
 // messages word for word (see src/compaction.js). Anything unexpected, the setting being off, a subagent, or
@@ -138,7 +139,7 @@ async function packet($, id, messages, instructions, trigger, extra = {}) {
 }
 export function register(on) {
   on('session.start', async ($, e, next) => {
-    try { if (!e.agentId){const id=await $.session.id();ended.delete(id);await cli($, 'summary-host',id)} } catch {}
+    try { if (!e.agentId){const id=await $.session.id();ended.delete(id);noteModule('session.start',{session:id});await cli($, 'summary-host',id)} } catch(error) { noteModule('session.start_failed',{message:error?.message}) }
     return next(e)
   })
   on('turn.complete', async ($, e, next) => {
@@ -169,6 +170,7 @@ export function register(on) {
     let plan,id
     try {
       id=await $.session.id()
+      noteModule('session.compact',{session:id,trigger:e.trigger,messages:e.messages?.length})
       plan = await packet($, id, e.messages, e.instructions, e.trigger)
       if(plan?.catchup?.host){
         const ms=Math.min(Math.max(0,Number(plan.catchup.deadlineMs)||0),240000),started=Date.now()
@@ -182,9 +184,12 @@ export function register(on) {
         plan=await packet($,id,e.messages,e.instructions,e.trigger,{afterCatchup:true,catchupMs:Date.now()-started})
       }
       if(!plan?.use&&plan?.rescue&&!ended.has(id)&&!e.signal?.aborted)plan=await rescueClaude($,id,e)||plan
-    } catch { plan = null;try{await cli($,'compact-diagnostic',await $.session.id())}catch{} }
-    if (!ended.has(id)&&!e.signal?.aborted&&plan?.use && plan.start > 0 && plan.start < e.messages.length)
+    } catch (error) { plan = null;noteModule('session.compact_failed',{session:id,message:error?.message});try{await cli($,'compact-diagnostic',await $.session.id())}catch{} }
+    if (!ended.has(id)&&!e.signal?.aborted&&plan?.use && plan.start > 0 && plan.start < e.messages.length) {
+      noteModule('session.compact_takeover',{session:id,trigger:e.trigger,start:plan.start})
       return { messages: [{ role: 'user', text: plan.packet, toolUses: [] }, ...e.messages.slice(plan.start)] }
+    }
+    noteModule('session.compact_native',{session:id,trigger:e.trigger,reason:plan?.error?'planner_error':plan?.reason||'no plan'})
     return next(e)
   })
 }

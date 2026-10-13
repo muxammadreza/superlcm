@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.31 — 2026-10-13
+
+- Fix every SuperLcm entry point failing on a database that still holds the 0.5.27 `summary_runs` table (`no such column: priority`): the old table is set aside in one transaction and the current layout created. Until then the console, MCP server, hooks and the compaction planner could not open the store, and Claude Code silently compacted by itself.
+- A store that cannot be opened no longer ends a hook or compaction call with empty output: the command answers JSON and leaves a line in `module-health.jsonl`, which does not depend on the database.
+- The Claude Code module records its session start, each `session.compact` call, and whether it took over or handed back (with the reason), including errors it used to swallow. A compaction Claude Code made without asking the module is recorded as `module_not_called`.
+
 ## 0.5.30 — 2026-10-11
 
 - Add one bounded current-conversation-model rescue for Claude takeover when prepared coverage or space remains insufficient. Reuse verified summaries, preserve the exact current request and recent tool-complete originals, and decline ambiguous sources.

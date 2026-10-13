@@ -8,7 +8,33 @@ export const summaryConcurrency = (env=process.env) => {
   const n=Number(env.SUPERLCM_SUMMARY_CONCURRENCY??3)
   return Number.isSafeInteger(n)&&n>=1&&n<=16?n:3
 }
+// An older layout of this table (the 0.5.27 fork build: integer id, started_by, no priority) would make the
+// CREATE below a no-op and the queue index fail on every start. It is set aside, or dropped when it is empty
+// and an earlier copy is already kept, so the new layout is created in a single transaction.
+function setAsideLegacyRuns(db) {
+  const columns = db.prepare('PRAGMA table_info(summary_runs)').all().map(c => c.name)
+  if (!columns.length || columns.includes('priority')) return
+  const names = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(t => t.name))
+  const empty = !db.prepare('SELECT 1 FROM summary_runs LIMIT 1').get()
+  db.exec('DROP INDEX IF EXISTS summary_runs_one_active; DROP INDEX IF EXISTS summary_runs_session; DROP INDEX IF EXISTS summary_runs_queue')
+  if (empty && names.has('summary_runs_legacy_0527')) { db.exec('DROP TABLE summary_runs'); return }
+  let name = 'summary_runs_legacy_0527', n = 1
+  while (names.has(name)) name = `summary_runs_legacy_0527_${++n}`
+  db.exec(`ALTER TABLE summary_runs RENAME TO ${name}`)
+}
 export function initializeSummaryRuns(db) {
+  const ownTransaction = !db.isTransaction
+  if (ownTransaction) db.exec('BEGIN IMMEDIATE')
+  try {
+    setAsideLegacyRuns(db)
+    createSummaryRuns(db)
+    if (ownTransaction) db.exec('COMMIT')
+  } catch (error) {
+    if (ownTransaction) try { db.exec('ROLLBACK') } catch {}
+    throw error
+  }
+}
+function createSummaryRuns(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS summary_runs(
     id TEXT PRIMARY KEY,session TEXT NOT NULL,state TEXT NOT NULL,origin TEXT NOT NULL,route TEXT NOT NULL,
     backend TEXT,model TEXT,revision TEXT NOT NULL,priority INTEGER NOT NULL,queued_ms INTEGER NOT NULL,

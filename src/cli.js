@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { visibleOutputRoom, isReducedSummary, reducedNotice, adaptiveSummaryTask, profileKey, readSummaryProfile, updateSummaryProfile } from './summary-generation.js'
 import { compactionDiagnostic } from './compaction-diagnostic.js'
+import { noteModule } from './module-health.js'
 import { ClaudeStore, claudeTranscript } from './store.js'
 import { codexTranscript, codexSessionKey } from './codex.js'
 import { nativeConversationName } from './conversation-names.js'
@@ -21,6 +22,15 @@ import { summaryTick, catchUp, catchupDeadlineMs, pendingLeaves } from './summar
 import { randomUUID } from 'node:crypto'
 import {claudeCompactionNodes} from './claude-checkpoints.js'
 import {hostDraft,retainHostDraft,hostSavedReceipt} from './claude-host-drafts.js'
+// A store that cannot be opened (a database the running version cannot read) must still answer the caller
+// with JSON, and leave a trace outside the database, instead of dying with an empty stdout.
+function openStore(command, reply) {
+  try { return new ClaudeStore() } catch (error) {
+    noteModule('store_unavailable', { command, message: error.message })
+    process.stdout.write(JSON.stringify(reply) + '\n', () => process.exit(0))
+    return null
+  }
+}
 const [command,...rest]=process.argv.slice(2)
 const homeFlag=rest.indexOf('--home')
 if(homeFlag>=0){if(!rest[homeFlag+1])throw Error('--home requires a path');process.env.SUPERLCM_HOME=rest[homeFlag+1];rest.splice(homeFlag,2)}
@@ -106,8 +116,8 @@ else if (command==='hermes-hook' || command==='pi-hook') {
 // The Claude plugin brings its own hooks; an older hook in Claude's settings then stays quiet, so each turn is handled once.
 else if (command==='hook' && process.env.SUPERLCM_VIA_PLUGIN!=='1' && claudePluginEnabled()) {}
 else if (command==='hook' || command==='codex-hook' || command==='index' || command==='index-codex' || command==='import' || command==='name' || command==='overview' || command==='summarize') {
-  const store=new ClaudeStore()
-  try {
+  const store=command==='hook'||command==='codex-hook'?openStore(command,{}):new ClaudeStore()
+  if(store)try {
     let result
     if (command==='hook' || command==='codex-hook') {
       const codex=command==='codex-hook'
@@ -139,6 +149,15 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
             const {code}=store.metadata(session),{records}=store.stats(session),run=store.takeTakeover(session)
             const last=file?lastCompaction(input.transcript_path):{own:false}
             const own=Boolean(run)||last.own
+            // Claude Code compacted by itself and SuperLcm was not asked (no planner result in the last few
+            // minutes): record it, so a module that stopped answering shows up after one compaction.
+            if(!own){
+              const seen=store.lastCompactionDiagnostic(session)
+              if(!seen||Date.now()-seen.at_ms>15*60000){
+                store.noteCompaction(session,{status:'native',code:'module_not_called',reason:'Claude Code 原生压缩时没有收到接管模块的请求；请查看 module-health.jsonl。',records,trigger:'unknown'})
+                noteModule('compaction_unattempted',{session})
+              }
+            }
             // The sizes are SuperLcm's own estimate of the whole context. Claude Code's postTokens leaves out the
             // system prompt, tools and rule files that every request carries, so it reads far too low.
             const out={systemMessage:compactNotice({own,run,records,code})}
@@ -174,8 +193,8 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
     if (command!=='hook' && command!=='codex-hook') process.stdout.write(JSON.stringify(result)+'\n')
   } catch(error) {process.stderr.write(`SuperLcm: ${error.message}\n`);process.exitCode=1} finally {store.close()}
 } else if (command==='compact-diagnostic'||command==='summary-host-error') {
-  const store=new ClaudeStore(),session=rest[0]
-  try {
+  const store=openStore(command,{error:true,reason:'store unavailable'}),session=rest[0]
+  if(store)try {
     if(session&&store.source(session)){
       if(command==='compact-diagnostic')store.noteCompaction(session,compactionDiagnostic({error:true},{records:store.stats(session).records}))
       else {
@@ -212,8 +231,8 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
   // Called by the plugin's compaction module (hooks/compact-mod.js) with the live transcript on stdin.
   // Always answers JSON; { use:false, reason } hands the compaction back to Claude Code.
   let reply
-  const store=new ClaudeStore()
-  try {
+  const store=openStore(command,{use:false,error:true,reason:'store unavailable; originals retained'})
+  if(store)try {
     const input=JSON.parse(await new Promise((resolve,reject)=>{let text='';process.stdin.setEncoding('utf8');process.stdin.on('data',part=>{text+=part;if(text.length>32e6)reject(new Error('Oversized compaction input'))});process.stdin.on('end',()=>resolve(text))}))
     const session=rest[0],src=session&&store.source(session),setting=store.takeover()
     if(!setting.enabled)reply={use:false,reason:'compaction takeover is off'}
@@ -253,8 +272,8 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
     }
     if(src&&(!setting.enabled||store.isDeleted(session)))store.noteCompaction(session,compactionDiagnostic(reply,{nodes:store.nodeRows(session,0),records:store.stats(session).records,before:input.tokens||0,trigger:input.trigger}))
   } catch(error) { reply={use:false,reason:'compaction planner failed; originals retained',error:true};if(rest[0]&&store.source(rest[0]))store.noteCompaction(rest[0],compactionDiagnostic(reply,{records:store.stats(rest[0]).records})) }
-  finally { store.close() }
-  process.stdout.write(JSON.stringify(reply)+'\n')
+  finally { store?.close() }
+  if(store)process.stdout.write(JSON.stringify(reply)+'\n')
 } else if (command==='summary-tick') {
   const store=new ClaudeStore()
   let reply
