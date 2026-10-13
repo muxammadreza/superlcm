@@ -249,7 +249,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
         const current=store.takeover()
         if(!current.enabled)return {use:false,reason:'compaction takeover is off'}
         const context=verifiedCompactionInput(store,session,input.messages||[])
-        return planCompaction({meta:store.metadata(session),events:context.events,nodes:claudeCompactionNodes(store,session),messages:context.messages,instructions:input.instructions||'',tokens:input.tokens||0,window:Math.min(input.window||current.window,current.window),keepTokens:current.keep})
+        return planCompaction({meta:store.metadata(session),events:context.events,nodes:claudeCompactionNodes(store,session),messages:context.messages,instructions:input.instructions||'',tokens:input.tokens||0,window:Math.min(input.window||current.window,current.window),keepTokens:current.keep,trigger:input.trigger})
       }
       const note=(result,stage,catchupMs=null)=>store.noteCompaction(session,{...compactionDiagnostic(result,{nodes:store.nodeRows(session,0),records:store.stats(session).records,before:input.tokens||0,trigger:input.trigger}),stage:stage||(result.stage==='inline'||result.inline?'inline':'first'),pending:pendingLeaves(store,session),after:result.after??null,catchupMs})
       const notePlan=(result,stage,ms=null)=>{

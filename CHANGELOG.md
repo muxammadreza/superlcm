@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.34 — 2026-10-13
+
+- Take over manual `/compact` instead of handing it back to Claude Code. Prompts are identified from Claude Code's recorded origin, so task notifications and other system turns no longer count. The kept tail previously counted harness messages as turns, so the newest "turns" could pull a whole long task back in and push the compacted context over its size limit. When the default tail is still too large, the planner keeps only the newest prompt, then only the end of that turn (with the original request preserved in the packet), before falling back.
+- A manual compaction prefers the smaller tail (at most half of the current context) when the default one would not reduce it much.
+- An uncovered native continuation in context is never dropped by the smaller tails.
+
 ## 0.5.33 — 2026-10-13
 
 - Keep summaries current when Claude Code compacts. From half of the compaction threshold, an open segment too long to carry word for word in the packet is written early instead of waiting for its full 20K-token size. A compaction that finds summaries behind also flushes the open segment and schedules a background run.

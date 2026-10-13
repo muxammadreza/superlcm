@@ -15,12 +15,13 @@ const MAX_PACKET_CHARS = 120000
 export const RECENT_CHARS = 40000
 const RECENT_RECORD = 3000
 const TARGET_AFTER = 0.25, MAX_AFTER = 0.35
-const KEEP_TURNS = 2 // the newest user prompts are always kept word for word
+const KEEP_PROMPTS = 2 // keep the newest prompts the person typed, as Claude Code's promptIndex counts them
 const key = text => String(text || '').replace(/\s+/g, '').slice(0, 600)
 const isPacket = m => m.role === 'user' && m.packetSummary !== false && m.text.trimStart().startsWith(`<${PACKET_TAG} `)
-// A prompt the person typed: a user message with text and no tool results.
+// A user turn start: text without tool results.
 const isSynthetic = m => isPacket(m) || m.nativeSummary === true
 const isPrompt = m => m.role === 'user' && m.text.trim() && !m.toolResults && !isSynthetic(m)
+const isHumanPrompt = m => isPrompt(m) && m.prompt !== 'system'
 const escapeAttr = s => String(s).replace(/[&"<>]/g, c => ({ '&': '&amp;', '"': '&quot;', '<': '&lt;', '>': '&gt;' })[c])
 
 // Records 0..through are covered when level-0 summaries chain from record 0 without a gap.
@@ -94,10 +95,10 @@ export function cutIndex(messages, events, through) {
   const candidates = cutCandidates(messages, events, through)
   return candidates.length === 1 ? candidates[0] : null
 }
-// Move the cut back to the start of a turn and keep the newest turns whole.
-export function tailStart(messages, cut) {
-  const prompts = messages.map((m, i) => isPrompt(m) ? i : -1).filter(i => i >= 0)
-  let start = Math.min(cut, prompts.length >= KEEP_TURNS ? prompts.at(-KEEP_TURNS) : prompts[0] ?? cut)
+// Keep the newest prompts the person typed (Claude Code's promptIndex); any user turn start is still a safe cut point.
+export function tailStart(messages, cut, keepPrompts = KEEP_PROMPTS) {
+  const prompts = messages.map((m, i) => isHumanPrompt(m) ? i : -1).filter(i => i >= 0)
+  let start = Math.min(cut, prompts.length >= keepPrompts ? prompts.at(-keepPrompts) : prompts[0] ?? cut)
   while (start > 0 && start < messages.length && !isPrompt(messages[start])) start--
   if (start === 0 && messages.length && !isPrompt(messages[0])) start = prompts.find(i => i > 0) ?? messages.length
   return start
@@ -141,7 +142,7 @@ export function planCompaction(input) {
   const inline = planWith(input, { first: through + 1, last, text })
   return inline.use ? {...inline,inline:true,stage:'inline',initial:{use:false,reason:plan.reason,after:plan.after??null}} : plan
 }
-function planWith({ meta, events, nodes, messages, instructions = '', tokens = 0, window = takeoverDefaults.window, keepTokens = takeoverDefaults.keep }, recent) {
+function planWith({ meta, events, nodes, messages, instructions = '', tokens = 0, window = takeoverDefaults.window, keepTokens = takeoverDefaults.keep, trigger }, recent) {
   const through = coveredThrough(nodes)
   // A shortened summary names its records for lcm_read and may stand for older history; the one right before
   // the kept messages is the work in hand and must be complete.
@@ -155,25 +156,29 @@ function planWith({ meta, events, nodes, messages, instructions = '', tokens = 0
   // Each message's share of Claude Code's own token count, by its size in characters.
   const size = m => m.size ?? (m.text.length + 200)
   const total = messages.reduce((s, m) => s + size(m), 0) || 1
-  let start = tailStart(messages, cut)
-  // tailStart moves forward only when the context opens with an unfinished turn; if that turn is not
-  // covered by the summaries, dropping it would lose it.
-  const oldestUncovered=start>cut
-  const emptyTail=start>=messages.length
-  // The newest keepTokens (at most half of the context) also stay word for word, from the start of a turn,
-  // even where summaries already cover them, so the work in hand continues with its full detail.
-  const want = Math.min(keepTokens, tokens / 2)
-  let wide = start, newest = messages.slice(start).reduce((s, m) => s + size(m), 0) * tokens / total
-  while (wide > 0 && newest < want) newest += size(messages[--wide]) * tokens / total
-  while (wide > 0 && !isPrompt(messages[wide])) newest += size(messages[--wide]) * tokens / total
-  // One very long turn (a big task run in one go) would pull its whole length in: then keep less instead.
-  if (wide > 0 && newest <= want * 2) start = Math.min(start, wide)
-  if (recent) { // the context must be this record: what is dropped, and the newest message, are all in it
+  const target=trigger==='manual'?Math.min(window*TARGET_AFTER,tokens*0.5):window*TARGET_AFTER
+  const widen = start => {
+    // The newest keepTokens (at most half of the context) also stay word for word, from the start of a turn,
+    // even where summaries already cover them, so the work in hand continues with its full detail.
+    const want = Math.min(keepTokens, tokens / 2)
+    let wide = start, newest = messages.slice(start).reduce((s, m) => s + size(m), 0) * tokens / total
+    while (wide > 0 && newest < want) newest += size(messages[--wide]) * tokens / total
+    while (wide > 0 && !isPrompt(messages[wide])) newest += size(messages[--wide]) * tokens / total
+    // One very long turn (a big task run in one go) would pull its whole length in: then keep less instead.
+    if (wide > 0 && newest <= want * 2) start = Math.min(start, wide)
+    return start
+  }
+  const matchesRecent = start => {
+    if (!recent) return true
+    // The context must be this record: what is dropped, and the newest message, are all in it.
     const known = new Set(events.filter(e => !e.nativeSummary && /^(user|assistant): /.test(e.preview)).map(e => key(e.preview)))
     const text = messages.map(m => m.text.trim() && !isSynthetic(m) ? key(`${m.role}: ${m.text.trim()}`) : null)
     const newest = text.findLast(k => k !== null)
-    if (!newest || !known.has(newest) || text.slice(0, start).some(k => k !== null && !known.has(k))) return { use: false, reason: 'the conversation in context does not match the record' }
+    return !!newest && known.has(newest) && !text.slice(0, start).some(k => k !== null && !known.has(k))
   }
+  // A native continuation (Claude Code's own summary) that no summary covers must stay in context.
+  const native = new Set(events.filter(e => e.preview.startsWith('user: ') && e.continuation && e.ordinal > through).map(e => key(e.preview)))
+  const dropsNative = start => messages.slice(0, start).some(m => m.role === 'user' && !m.nativeSummary && m.text.trim() && native.has(key(`user: ${m.text.trim()}`)))
   const finish=(at,request=null)=>{
     const keep=messages.length-at
     const packet=renderPacket({meta,summaries:frontier(nodes,through),through:recent?recent.last:through,keep,instructions,recent,request})
@@ -183,11 +188,19 @@ function planWith({ meta, events, nodes, messages, instructions = '', tokens = 0
     if(after>window*MAX_AFTER)return {use:false,reason:`the compacted context is too large: about ${after} tokens would remain`}
     return {use:true,packet,start:at,keep,through:recent?recent.last:through,after,...(recent?{recent:true}:{}),...(request?{inTurn:true}:{})}
   }
-  const normal=oldestUncovered?{use:false,reason:'the oldest messages in context are not summarized yet'}:emptyTail?{use:false,reason:'nothing recent to keep'}:finish(start)
-  if(normal.use&&normal.after<=window*TARGET_AFTER)return normal
-  const within=turnTail({messages,events,cut,tokens,total,size,keepTokens,window})
-  if(within){const compacted=finish(within.start,within.request);if(compacted.use&&(!normal.use||compacted.after<normal.after))return compacted}
-  return normal
+  const normalStart=widen(tailStart(messages,cut))
+  const candidate = (at,request=null) => at>cut||dropsNative(at)?{use:false,reason:'the oldest messages in context are not summarized yet'}:at>=messages.length?{use:false,reason:'nothing recent to keep'}:!matchesRecent(at)?{use:false,reason:'the conversation in context does not match the record'}:finish(at,request)
+  const normal=candidate(normalStart)
+  if(normal.use&&normal.after<=target)return normal
+  // Smaller tails only where summaries cover what they drop. Carried dialogue is cut short, and a bounded
+  // catch-up that writes real summaries is the better answer there.
+  const oneTurn=recent?null:candidate(widen(tailStart(messages,cut,1)))
+  if(oneTurn?.use&&oneTurn.after<=target)return oneTurn
+  const within=turnTail({messages,events,cut,tokens,total,size,keepTokens,window,force:!recent})
+  const compacted=within?candidate(within.start,within.request):null
+  if(compacted?.use&&compacted.after<=target)return compacted
+  const usable=[normal,oneTurn,compacted].filter(x=>x?.use)
+  return usable.length?usable.reduce((a,b)=>b.after<a.after?b:a):normal
 }
 
 // Keep a complete tool group at the start of the retained suffix, even when
@@ -208,12 +221,12 @@ function requestAt(events,ordinal) {
  if(!e||e.nativeSummary||!e.preview.startsWith('user: ')||e.toolResults||e.humanPrompt===false)return null
  return {ordinal:e.ordinal,text:e.text??e.preview.slice(6)}
 }
-export function turnTail({messages,events,cut,tokens,total,size,keepTokens,window}) {
- const p=messages.findLastIndex(m=>isPrompt(m)||isPacket(m)||m.nativeSummary)
+export function turnTail({messages,events,cut,tokens,total,size,keepTokens,window,force=false}) {
+ const p=messages.findLastIndex(m=>isHumanPrompt(m)||isPacket(m)||m.nativeSummary)
  if(p<0)return null
  const anchor=messages[p],synthetic=isPacket(anchor)||anchor.nativeSummary
  const span=messages.slice(p).reduce((s,m)=>s+size(m),0)*tokens/total
- if(!synthetic&&span<=Math.max(keepTokens*2,window*TARGET_AFTER))return null
+ if(!force&&!synthetic&&span<=Math.max(keepTokens*2,window*TARGET_AFTER))return null
  let request
  if(isPacket(anchor)){
   const ordinal=Number(/^\s*<superlcm-context [^>]*\brequest="(\d+)"/.exec(anchor.text)?.[1])
