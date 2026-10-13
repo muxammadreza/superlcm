@@ -1,7 +1,6 @@
 import { fitSummary, repairSummaryPrompt } from '../src/summary-fitting.js'
 import { checkedSummary } from '../src/summary-policy.js'
 import {rescueClaude,discardClaudeRescue} from './claude-rescue.js'
-import {noteModule} from '../src/module-health.js'
 // A Claude Code module (2.1.286+), two jobs:
 // 接管压缩: when the main conversation compacts, SuperLcm answers with its own summaries plus the newest
 // messages word for word (see src/compaction.js). Anything unexpected, the setting being off, a subagent, or
@@ -14,6 +13,7 @@ import {noteModule} from '../src/module-health.js'
 // when the session ends, or after a failed call, goes to the separate `claude -p` worker as before.
 const cli = ($, command, id, stdin, { flags = [], timeoutMs = 60000 } = {}) => $.process.run(['node', `${$.plugin.root}/src/launch.js`, command, id, ...flags], { stdin: stdin ?? '', timeoutMs })
   .then(r => JSON.parse(r.stdout.trim().split('\n').at(-1) || '{}'))
+function note($,stage,detail={}) { try { Promise.resolve($.process.run(['node',`${$.plugin.root}/src/launch.js`,'module-health',stage],{stdin:JSON.stringify(detail),timeoutMs:5000})).catch(()=>{}) } catch {} }
 const MAX_PIECES = 2000 // a whole backlog in one background run (one at a time per session); turns never wait for it
 const writing = new Map(), ticked = new Map(), ticking = new Set(), ended = new Set()
 const outputs = new Map()
@@ -139,16 +139,16 @@ async function packet($, id, messages, instructions, trigger, extra = {}) {
 }
 export function register(on) {
   on('session.start', async ($, e, next) => {
-    try { if (!e.agentId){const id=await $.session.id();ended.delete(id);noteModule('session.start',{session:id});await cli($, 'summary-host',id)} } catch(error) { noteModule('session.start_failed',{message:error?.message}) }
+    try { if (!e.agentId){const id=await $.session.id();ended.delete(id);note($,'session.start',{session:id});await cli($, 'summary-host',id)} } catch(error) { note($,'session.start_failed',{message:error?.message}) }
     return next(e)
   })
   on('turn.complete', async ($, e, next) => {
     if (!e.agentId) $.session.id().then(id => writeSummaries($, id)).catch(() => {})
     return next(e)
   })
-  on('turn.step', ($, e, next) => {
+  on('turn.step', async function* ($, e, next) {
     if(!e.agentId)try{Promise.resolve($.session.id()).then(id=>summaryTick($,id)).catch(()=>{})}catch{}
-    return next(e)
+    return yield* next(e)
   })
   on('session.end', async ($, e, next) => {
     if(e.agentId)return next(e)
@@ -170,7 +170,7 @@ export function register(on) {
     let plan,id
     try {
       id=await $.session.id()
-      noteModule('session.compact',{session:id,trigger:e.trigger,messages:e.messages?.length})
+      note($,'session.compact',{session:id,trigger:e.trigger,messages:e.messages?.length})
       plan = await packet($, id, e.messages, e.instructions, e.trigger)
       if(plan?.catchup?.host){
         const ms=Math.min(Math.max(0,Number(plan.catchup.deadlineMs)||0),240000),started=Date.now()
@@ -183,13 +183,13 @@ export function register(on) {
         finally{clearTimeout(timer);if(cancel)e.signal.removeEventListener('abort',cancel)}
         plan=await packet($,id,e.messages,e.instructions,e.trigger,{afterCatchup:true,catchupMs:Date.now()-started})
       }
-      if(!plan?.use&&plan?.rescue&&!ended.has(id)&&!e.signal?.aborted)plan=await rescueClaude($,id,e)||plan
-    } catch (error) { plan = null;noteModule('session.compact_failed',{session:id,message:error?.message});try{await cli($,'compact-diagnostic',await $.session.id())}catch{} }
+      if(!plan?.use&&plan?.rescue&&!ended.has(id)&&!e.signal?.aborted)plan=await rescueClaude({root:$.plugin.root,run:(...args)=>$.process.run(...args),usage:()=>$.session.usage(),currentModel:()=>$.session.model(),complete:options=>$.model.complete(options)},id,e)||plan
+    } catch (error) { plan = null;note($,'session.compact_failed',{session:id,message:error?.message});try{await cli($,'compact-diagnostic',await $.session.id())}catch{} }
     if (!ended.has(id)&&!e.signal?.aborted&&plan?.use && plan.start > 0 && plan.start < e.messages.length) {
-      noteModule('session.compact_takeover',{session:id,trigger:e.trigger,start:plan.start})
+      note($,'session.compact_takeover',{session:id,trigger:e.trigger,start:plan.start})
       return { messages: [{ role: 'user', text: plan.packet, toolUses: [] }, ...e.messages.slice(plan.start)] }
     }
-    noteModule('session.compact_native',{session:id,trigger:e.trigger,reason:plan?.error?'planner_error':plan?.reason||'no plan'})
+    note($,'session.compact_native',{session:id,trigger:e.trigger,reason:plan?.error?'planner_error':plan?.reason||'no plan'})
     return next(e)
   })
 }

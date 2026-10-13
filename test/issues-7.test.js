@@ -14,6 +14,7 @@ process.env.SUPERLCM_SEGMENT_MESSAGES='2'
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
 const deferred = () => { let resolve;const promise=new Promise(r=>{resolve=r});return {promise,resolve} }
 const flush = async () => { for(let n=0;n<8;n++)await new Promise(r=>setImmediate(r)) }
+const step = (hook,$,event,next=e=>[e]) => hook($,event,next).next()
 let serial=0
 const text = '# Current state\nThe user permitted a dry-run only. Deployment remains pending. The synthetic tool reported failure.'
 const answered = () => ({isAnswered:true,text,stopReason:'end_turn'})
@@ -51,7 +52,7 @@ test('turn.step observes a long turn immediately and preserves the exact next ev
   const blocked=deferred(),seen=deferred()
   const f=hostFixture({run:async({command})=>{if(command==='summary-tick'){seen.resolve();await blocked.promise;return {host:true}}if(command==='summary-claim')return work(1);if(command==='summary-check')return {valid:true};if(command==='summary-save')return {saved:true,more:false}}})
   const event={turnId:'long-synthetic-turn',index:50,messageCount:200},out={unchanged:true}
-  assert.equal(f.h.get('turn.step')(f.$,event,e=>{assert.equal(e,event);return out}),out)
+  assert.equal((await step(f.h.get('turn.step'),f.$,event,e=>{assert.equal(e,event);return [out]})).value,out)
   await seen.promise
   assert.equal(f.modelCalls.length,0)
   blocked.resolve();await flush()
@@ -61,13 +62,13 @@ test('turn.step observes a long turn immediately and preserves the exact next ev
 
 test('turn.step is throttled per session for 45 seconds and excludes subagents',async t=>{
   let now=1000000;t.mock.method(Date,'now',()=>now)
-  const f=hostFixture(),other=hostFixture(),next=e=>e
-  for(let i=0;i<10;i++)f.h.get('turn.step')(f.$,{index:i},next)
+  const f=hostFixture(),other=hostFixture(),next=e=>[e]
+  for(let i=0;i<10;i++)await step(f.h.get('turn.step'),f.$,{index:i},next)
   await flush();assert.equal(f.commands.length,1)
-  now+=44999;f.h.get('turn.step')(f.$,{},next);await flush();assert.equal(f.commands.length,1)
-  now++;f.h.get('turn.step')(f.$,{},next);await flush();assert.equal(f.commands.length,2)
-  other.h.get('turn.step')(other.$,{},next);await flush();assert.equal(other.commands.length,1)
-  f.h.get('turn.step')(f.$,{agentId:'synthetic-child'},next)
+  now+=44999;await step(f.h.get('turn.step'),f.$,{},next);await flush();assert.equal(f.commands.length,1)
+  now++;await step(f.h.get('turn.step'),f.$,{},next);await flush();assert.equal(f.commands.length,2)
+  await step(other.h.get('turn.step'),other.$,{},next);await flush();assert.equal(other.commands.length,1)
+  await step(f.h.get('turn.step'),f.$,{agentId:'synthetic-child'},next)
   await f.h.get('turn.complete')(f.$,{agentId:'synthetic-child'},next)
   await f.h.get('session.end')(f.$,{agentId:'synthetic-child'},next)
   assert.equal(f.commands.length,2)
@@ -76,8 +77,8 @@ test('turn.step is throttled per session for 45 seconds and excludes subagents',
 test('turn.step keeps an unfinished tick exclusive even after the throttle expires',async t=>{
   let now=1000000;t.mock.method(Date,'now',()=>now)
   const blocked=deferred(),f=hostFixture({run:async({command})=>{if(command==='summary-tick')await blocked.promise}})
-  f.h.get('turn.step')(f.$,{},e=>e);await flush()
-  now+=90000;f.h.get('turn.step')(f.$,{},e=>e);await flush()
+  await step(f.h.get('turn.step'),f.$,{});await flush()
+  now+=90000;await step(f.h.get('turn.step'),f.$,{});await flush()
   assert.equal(f.commands.length,1);blocked.resolve();await flush()
 })
 
@@ -166,7 +167,7 @@ test('session.end defers worker handoff until an outstanding host request has se
 test('a late step observation cannot start host work after the session has ended',async()=>{
   const late=deferred(),seen=deferred()
   const f=hostFixture({run:async({command})=>{if(command==='summary-tick'){seen.resolve();await late.promise;return {host:true}}if(command==='summary-claim')return work(1)}})
-  f.h.get('turn.step')(f.$,{},e=>e);await seen.promise
+  await step(f.h.get('turn.step'),f.$,{});await seen.promise
   await f.h.get('session.end')(f.$,{},e=>e)
   late.resolve();await flush()
   await f.h.get('turn.complete')(f.$,{},e=>e);await flush()
@@ -189,7 +190,7 @@ test('compaction input carries exact tool call and result IDs',async()=>{
   const f=hostFixture({run:async()=>({use:false})})
   const toolMessages=[{role:'assistant',text:'',toolUses:[{id:'a'},{tool_use_id:'b'},{call_id:'c'}]},{role:'user',text:'',toolResults:[{tool_use_id:'a'},{id:'b'}]},{role:'user',text:'',toolResultIds:['c']}]
   await f.h.get('session.compact')(f.$,{messages:toolMessages},()=>({}))
-  const sent=f.commands[0].input.messages
+  const sent=f.commands.find(c=>c.command==='compact-packet').input.messages
   assert.deepEqual(sent[0].toolUses,[{tool_use_id:'a'},{tool_use_id:'b'},{tool_use_id:'c'}])
   assert.deepEqual(sent[1].toolResultIds,['a','b']);assert.deepEqual(sent[2].toolResultIds,['c'])
 })
@@ -223,9 +224,9 @@ test('the real hook module runs in a VM without process or builtin module import
     }}}
     const out=await hooks.get('session.compact')($,{messages},()=>assert.fail('The VM must replace the context'))
     assert.equal(out.messages[0].text,'Synthetic VM packet')
-    assert.equal(calls[0].options.timeoutMs,270000)
+    assert.equal(calls.find(c=>c.command==='compact-packet').options.timeoutMs,270000)
     const event={index:99,turnId:'long-vm-turn'}
-    assert.equal(hooks.get('turn.step')($,event,e=>e),event)
+    assert.equal((await hooks.get('turn.step')($,event,e=>[e]).next()).value,event)
     for(let i=0;i<8;i++)await new Promise(r=>setTimeout(r,0))
     assert.ok(calls.some(c=>c.command==='summary-tick'))
     assert.equal(runInContext('typeof process',context),'undefined')

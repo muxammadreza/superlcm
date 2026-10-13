@@ -33,4 +33,10 @@ for(const dir of runtimeDirs){
 }
 for(const target of [...Object.values(pkg.bin||{}),...Object.values(pkg.exports||{}).filter(v=>typeof v==='string'),pkg.dsh?.bundle?.patch].filter(Boolean))assert.ok(files.has(target.replace(/^\.\//,'')),'Entrypoint omitted from package: '+target)
 if(pkg.name==='superlcm-mcp')for(const name of ['.claude-plugin/plugin.json','dsh/ui/package.json'])assert.equal(JSON.parse(readFileSync(resolve(root,name))).version,pkg.version,name+' version drift')
+const claudePath=spawnSync(process.platform==='win32'?'where':'which',['claude'],{encoding:'utf8'})
+if(claudePath.status===0){
+ const validation=spawnSync('claude',['plugin','validate',root],{cwd:root,encoding:'utf8',maxBuffer:16*1024*1024}),output=(validation.stdout||'')+(validation.stderr||'')
+ assert.equal(validation.status,0,'claude plugin validate failed:\n'+output)
+ assert.ok(!output.includes('✘'),'claude plugin validate reported errors:\n'+output)
+}
 console.log(JSON.stringify({package:pkg.name,version:pkg.version,packedFiles:files.size,localImportsVerified:imports}))

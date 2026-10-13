@@ -10,7 +10,7 @@ export function discardClaudeRescue(session) {
   ready.delete(session)
   pending.get(session)?.controller.abort(Error('Session ended'))
 }
-export async function rescueClaude($,id,event) {
+export async function rescueClaude(api,id,event) {
   const messages=()=>event.messages.map(liveMessage)
   const eventHash=fingerprint([messages(),event.instructions||'',event.trigger]),running=pending.get(id)
   if(running)return running.hash===eventHash?running.promise:null
@@ -21,7 +21,7 @@ export async function rescueClaude($,id,event) {
   if(event.signal){event.signal.addEventListener('abort',forward,{once:true});if(event.signal.aborted)forward()}
   const call=async(command,payload)=>{
     signal.throwIfAborted()
-    const result=await $.process.run(['node',`${$.plugin.root}/src/launch.js`,command,id],{stdin:JSON.stringify({...payload,cancel_id:cancelId}),timeoutMs:60000})
+    const result=await api.run(['node',`${api.root}/src/launch.js`,command,id],{stdin:JSON.stringify({...payload,cancel_id:cancelId}),timeoutMs:60000})
     signal.throwIfAborted()
     const reply=JSON.parse(result.stdout.trim().split('\n').at(-1)||'{}')
     if(reply.error)throw Error('Final summary storage unavailable')
@@ -29,14 +29,14 @@ export async function rescueClaude($,id,event) {
   }
   const stopped=async draft=>{
     // Dispatch before awaiting the blocked save. CLI writes the marker before opening SQLite.
-    try{await $.process.run(['node',`${$.plugin.root}/src/launch.js`,'compact-rescue-stop',id],{stdin:JSON.stringify({...draft,cancel_id:cancelId}),timeoutMs:60000})}catch{}
+    try{await api.run(['node',`${api.root}/src/launch.js`,'compact-rescue-stop',id],{stdin:JSON.stringify({...draft,cancel_id:cancelId}),timeoutMs:60000})}catch{}
   }
   const cancel=()=>{revoke ||= stopped(work)}
   signal.addEventListener('abort',cancel,{once:true})
   if(signal.aborted)cancel()
   const promise=(async()=>{
     try{
-      const usage=await $.session.usage(),model=await $.session.model()
+      const usage=await api.usage(),model=await api.currentModel()
       signal.throwIfAborted()
       const input={messages:messages(),tokens:usage.context.tokens||0,window:usage.context.window||0,instructions:event.instructions||'',model,trigger:event.trigger}
       const hash=fingerprint(input)
@@ -45,7 +45,7 @@ export async function rescueClaude($,id,event) {
       if(cached)work=cached.work
       else{
         const plan=await call('compact-rescue-prepare',input)
-        if(plan.use)return await $.session.model()===input.model&&fingerprint(messages())===fingerprint(input.messages)?plan:null
+        if(plan.use)return await api.currentModel()===input.model&&fingerprint(messages())===fingerprint(input.messages)?plan:null
         work=plan.work
         if(!work)return null
       }
@@ -56,16 +56,16 @@ export async function rescueClaude($,id,event) {
         const remaining=Math.max(1,work.deadline_ms-Date.now())
         const timer=setTimeout(()=>controller.abort(Error('Final summary request timed out')),remaining)
         let answer
-        try{answer=await abortable(Promise.resolve().then(()=>{signal.throwIfAborted();return $.model.complete({model:work.model,system:work.system,prompt:work.prompt,maxTokens:work.maxTokens,timeoutMs:remaining})}),signal)}
+        try{answer=await abortable(Promise.resolve().then(()=>{signal.throwIfAborted();return api.complete({model:work.model,system:work.system,prompt:work.prompt,maxTokens:work.maxTokens,timeoutMs:remaining})}),signal)}
         finally{clearTimeout(timer)}
         signal.throwIfAborted()
-        if(answer?.isAnswered!==true||await $.session.model()!==work.model)throw Error('Final summary incomplete or model changed')
+        if(answer?.isAnswered!==true||await api.currentModel()!==work.model)throw Error('Final summary incomplete or model changed')
         const finishReason=answer.stopReason??answer.stop_reason??answer.finishReason??answer.finish_reason
         const summary=checkedSummary(answer.text,{...work.task,maxChars:60000,finishReason})
         saved={...identity,summary,isAnswered:true,finishReason}
         ready.set(id,{hash,work,saved})
       }
-      if(await $.session.model()!==work.model||fingerprint(messages())!==fingerprint(input.messages)||!(await call('compact-rescue-check',identity)).valid){ready.delete(id);await stopped(work);return null}
+      if(await api.currentModel()!==work.model||fingerprint(messages())!==fingerprint(input.messages)||!(await call('compact-rescue-check',identity)).valid){ready.delete(id);await stopped(work);return null}
       let plan
       // Retry only the save boundary, never buy the main summary again.
       for(let attempt=0;attempt<2;attempt++){

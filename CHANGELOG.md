@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.32 — 2026-10-13
+
+- Fix Claude Code (2.1.295+) refusing to load the compaction module, so every compaction was Claude Code's own: the `turn.step` hook is now an async generator, as streaming events require, and the module no longer imports `node:fs` (health lines go through a new `module-health` CLI command). 0.5.25–0.5.31 never took over a compaction on these builds.
+- The release check runs `claude plugin validate` when Claude Code is installed, so a module Claude Code would refuse cannot ship again.
+
 ## 0.5.31 — 2026-10-13
 
 - Fix every SuperLcm entry point failing on a database that still holds the 0.5.27 `summary_runs` table (`no such column: priority`): the old table is set aside in one transaction and the current layout created. Until then the console, MCP server, hooks and the compaction planner could not open the store, and Claude Code silently compacted by itself.

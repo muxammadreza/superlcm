@@ -70,7 +70,11 @@ function compactNotice({own,run,records,code}) {
   return zh?`对话已压缩 · Claude Code 自带压缩 · ${n} 条原文仍保存在 #${code}`:`Conversation compacted · by Claude Code · ${n} original records still kept as #${code}`
 }
 const derivedTitle=(store,session)=>store.eventRows(session).find(e=>e.preview.startsWith('user:'))?.preview.replace(/^user:\s*/,'').replace(/\s+/g,' ').trim().slice(0,90)
-if (command==='setup' || command==='doctor-local') {
+if(command==='module-health'){
+  let text='';process.stdin.setEncoding('utf8');for await(const part of process.stdin)text+=part
+  let detail={};try{const input=JSON.parse(text);if(input&&typeof input==='object'&&!Array.isArray(input))detail=input}catch{}
+  noteModule(rest[0]||'unknown',detail);process.stdout.write('{}\n')
+} else if (command==='setup' || command==='doctor-local') {
   const store=new ClaudeStore()
   try {
     const {harnessConnections}=await import('./harness.js')
