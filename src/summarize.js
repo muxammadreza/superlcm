@@ -129,6 +129,21 @@ function segmentEnd(events, from, budget, batchSize) {
   }
   return -1
 }
+// The open segment closed early (store.summaryFlush): at the last point up to `through` where no tool call
+// waits for its result, so the newest records are covered before Claude Code compacts.
+function flushEnd(events, from, through) {
+  let end = -1
+  const pending=new Set()
+  for (let i = from; i < events.length && events[i].ordinal <= through; i++) {
+    if (!visibleEvent(events[i])) continue
+    const pairing=events[i].toolPairing||{opened:[],closed:[]}
+    for(const id of pairing.opened)pending.add(id)
+    for(const id of pairing.closed)pending.delete(id)
+    if (!pending.size) end = i
+  }
+  return end
+}
+const flushAt=(store,session)=>store.summaryFlush?.(session)??null
 // Full text of one record; only a record longer than the whole segment keeps its head and tail.
 function recordText(e, budget) {
   const text = e.summaryText
@@ -154,7 +169,8 @@ export function summaryWork(store, session, options = {}) {
   const done = [...store.nodeRows(session, 0),...claudeCheckpoints(store,session)].sort((a,b)=>a.last-b.last)
   const start = done.length ? Math.max(...done.map(n => n.last)) + 1 : 0
   const events = summaryEvents(store, session, start)
-  const end = segmentEnd(events, 0, budget, batchSize)
+  let end = segmentEnd(events, 0, budget, batchSize)
+  if (end < 0 && flushAt(store,session) !== null) end = flushEnd(events, 0, flushAt(store,session))
   if (end >= 0) {
   const batch = events.slice(0, end + 1)
   const language=detectSummaryLanguage(store.source(session).kind==='text'?excerptUserTexts(batch.map(e=>store.exact(session,e.ordinal)).join('')):batch.map(e=>userTextFromRecord(store.exact(session,e.ordinal))),fallback)
@@ -202,6 +218,7 @@ export function summaryEstimate(store, session, options={}) {
   const events = summaryEvents(store, session, start)
   let segments = 0, from = 0
   for (let end; (end = segmentEnd(events, from, budget, options.batchSize??segmentMessages())) >= 0; from = end + 1) segments++
+  if (flushAt(store,session) !== null) { const end = flushEnd(events, from, flushAt(store,session)); if (end >= 0) { segments++; from = end + 1 } }
   const pending = events.length - from, chars = events.slice(from).filter(visibleEvent).reduce((a, e) => a + textLength(e), 0), records = from
   let calls = segments, below = done.length + segments
   for (let level = 1; level <= 12 && below >= fanout; level++) {

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.33 — 2026-10-13
+
+- Keep summaries current when Claude Code compacts. From half of the compaction threshold, an open segment too long to carry word for word in the packet is written early instead of waiting for its full 20K-token size. A compaction that finds summaries behind also flushes the open segment and schedules a background run.
+- A precompute that finds summaries behind is skipped instead of handed to Claude Code, because a native precompute is kept and swapped in at the threshold without asking SuperLcm again.
+- One mechanically shortened leaf no longer blocks every later takeover through the parents it was merged into. The packet uses the complete lower-level summaries of the same records, and declines only when the summary right before the kept messages is shortened.
+
 ## 0.5.32 — 2026-10-13
 
 - Fix Claude Code (2.1.295+) refusing to load the compaction module, so every compaction was Claude Code's own: the `turn.step` hook is now an async generator, as streaming events require, and the module no longer imports `node:fs` (health lines go through a new `module-health` CLI command). 0.5.25–0.5.31 never took over a compaction on these builds.

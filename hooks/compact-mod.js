@@ -128,7 +128,9 @@ function summaryTick($,id) {
   const now=Date.now()
   if(ticking.has(id)||(ticked.has(id)&&now-ticked.get(id)<45000))return
   ticked.set(id,now);ticking.add(id)
-  void cli($,'summary-tick',id).then(reply=>{if(reply.host&&!ended.has(id))return writeSummaries($,id)}).catch(()=>{}).finally(()=>ticking.delete(id))
+  // The context size lets the tick write the open segment early once it nears Claude Code's threshold.
+  void Promise.resolve().then(()=>$.session.usage()).then(u=>['--tokens',String(u?.context?.tokens||0),'--window',String(u?.context?.window||0)],()=>[])
+    .then(flags=>cli($,'summary-tick',id,'',{flags})).then(reply=>{if(reply.host&&!ended.has(id))return writeSummaries($,id)}).catch(()=>{}).finally(()=>ticking.delete(id))
 }
 const toInput = messages => messages.map(m => ({ role: m.role, text: m.text.slice(0, 2000), toolUses:(m.toolUses||[]).map(t=>({tool_use_id:t.tool_use_id||t.id||t.call_id})),toolResultIds:m.toolResultIds||(m.toolResults||[]).map(t=>t.tool_use_id||t.id||t.call_id).filter(Boolean),toolResults: m.toolResults?.length ? 1 : 0, size: m.text.length + JSON.stringify(m.toolUses || []).length + JSON.stringify(m.toolResults || []).length + 200 }))
 async function packet($, id, messages, instructions, trigger, extra = {}) {
@@ -165,7 +167,8 @@ export function register(on) {
   on('session.compact', async ($, e, next) => {
     // Subagents stay with Claude Code. Precompute (Claude Code preparing the compaction ahead of time,
     // kept and swapped in at the threshold without asking again) is answered too: when the summaries are
-    // ready, ours is what gets kept; when they are not, Claude Code prepares its own as usual.
+    // ready, ours is what gets kept; when they are only behind, it is skipped (below) and Claude Code asks
+    // again at its threshold; otherwise Claude Code prepares its own as usual.
     if (e.agentId) return next(e)
     let plan,id
     try {
@@ -182,6 +185,13 @@ export function register(on) {
         try{await Promise.race([writeSummaries($,id,{deadline:started+ms,maxPieces:4,signal:e.signal}),stopped])}
         finally{clearTimeout(timer);if(cancel)e.signal.removeEventListener('abort',cancel)}
         plan=await packet($,id,e.messages,e.instructions,e.trigger,{afterCatchup:true,catchupMs:Date.now()-started})
+      }
+      // A precompute answered by Claude Code is kept and swapped in at the threshold without asking again. While
+      // the summaries are only behind, skip it: they keep being written, and the threshold asks this hook again.
+      if(e.trigger==='precompute'&&plan?.retry&&!plan.use&&!ended.has(id)){
+        if(plan.retry==='host')void writeSummaries($,id).catch(()=>{})
+        note($,'session.compact_deferred',{session:id,trigger:e.trigger})
+        return {skip:'SuperLcm summaries are catching up'}
       }
       if(!plan?.use&&plan?.rescue&&!ended.has(id)&&!e.signal?.aborted)plan=await rescueClaude({root:$.plugin.root,run:(...args)=>$.process.run(...args),usage:()=>$.session.usage(),currentModel:()=>$.session.model(),complete:options=>$.model.complete(options)},id,e)||plan
     } catch (error) { plan = null;note($,'session.compact_failed',{session:id,message:error?.message});try{await cli($,'compact-diagnostic',await $.session.id())}catch{} }

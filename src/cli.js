@@ -259,6 +259,8 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
       reply=plan()
       notePlan(reply,input.afterCatchup?'catchup':null,input.afterCatchup&&Number.isFinite(input.catchupMs)?input.catchupMs:null)
       const eligible=['coverage_lag','uncovered_oldest','no_summaries','context_too_large'].includes(compactionDiagnostic(reply).code)
+      // Summaries behind: the open segment is written now too, not when it reaches its full size.
+      if(!reply.use&&!reply.ambiguous&&eligible)store.setSummaryFlush(session,store.db.prepare('SELECT MAX(ordinal) AS o FROM events WHERE session=?').get(session)?.o??-1)
       if(!input.afterCatchup&&!reply.use&&!reply.ambiguous&&reply.stage!=='inline'&&!reply.inline&&eligible){
         const pending=pendingLeaves(store,session),deadlineMs=catchupDeadlineMs(),chosen=effective(store,session),harness=store.metadata(session).harness
         if(deadlineMs>0&&pending>=1&&pending<=4&&store.integrationEnabled(harness)&&['cli','api'].includes(chosen.mode)){
@@ -271,6 +273,13 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
           }
         }
       }
+      // Still behind: keep writing in the background, and tell the module a later attempt may succeed
+      // (a precompute is then skipped, so Claude Code asks again at its threshold).
+      if(!reply.use&&!reply.ambiguous&&['coverage_lag','uncovered_oldest','no_summaries','context_too_large'].includes(compactionDiagnostic(reply).code)){
+        const {mode,model}=effective(store,session)
+        reply.retry=mode==='cli'&&writerTool(store.metadata(session).harness)==='claude-code'?'host':true
+        try{scheduleSummary(store,session,mode,model)}catch{}
+      }
       if(reply.use)store.noteTakeover(session,input.tokens||0,reply.after||0)
       else if(!reply.ambiguous&&store.integrationEnabled('claude-code')&&store.metadata(session).harness==='claude-code'&&['coverage_lag','uncovered_oldest','no_summaries','context_too_large','unplaced_boundary'].includes(compactionDiagnostic(reply).code))reply.rescue=true
     }
@@ -281,7 +290,8 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
 } else if (command==='summary-tick') {
   const store=new ClaudeStore()
   let reply
-  try{reply=summaryTick(store,rest[0])}catch{reply={error:'Summary tick failed; originals retained'}}
+  const flag=name=>{const at=rest.indexOf(name),n=at<0?0:Number(rest[at+1]);return Number.isSafeInteger(n)&&n>0?n:0}
+  try{reply=summaryTick(store,rest[0],{tokens:flag('--tokens'),window:flag('--window')})}catch{reply={error:'Summary tick failed; originals retained'}}
   finally{store.close()}
   process.stdout.write(JSON.stringify(reply)+'\n')
 } else if (['summary-host','summary-claim','summary-save','summary-handoff','summary-check','summary-release'].includes(command)) {

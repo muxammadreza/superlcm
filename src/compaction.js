@@ -12,7 +12,8 @@ const MAX_PACKET_CHARS = 120000
 // A stretch of mostly tool calls can fill the window while its dialogue is still too short to close a
 // summary segment. Dialogue up to this size goes into the packet word for word instead (tool output stays
 // readable through lcm_read), so such a stretch does not hand the compaction back to Claude Code.
-const RECENT_CHARS = 40000, RECENT_RECORD = 3000
+export const RECENT_CHARS = 40000
+const RECENT_RECORD = 3000
 const TARGET_AFTER = 0.25, MAX_AFTER = 0.35
 const KEEP_TURNS = 2 // the newest user prompts are always kept word for word
 const key = text => String(text || '').replace(/\s+/g, '').slice(0, 600)
@@ -32,10 +33,13 @@ export function coveredThrough(nodes) {
   return through
 }
 // The fewest summaries that tile records 0..through: at each point the highest level that starts there.
+// A mechanically shortened summary (and each merge above it, which inherits the mark) gives way to complete
+// lower-level summaries of the same records; only where none exists does the smallest shortened one stand.
 export function frontier(nodes, through) {
   const out = []
   for (let at = 0; at <= through;) {
-    const n = nodes.filter(x => x.first === at && x.last <= through).sort((a, b) => b.level - a.level)[0]
+    const fits = nodes.filter(x => x.first === at && x.last <= through).sort((a, b) => b.level - a.level)
+    const n = fits.find(x => !isReducedSummary(x.summary)) || fits.at(-1)
     if (!n) break
     out.push(n); at = n.last + 1
   }
@@ -139,7 +143,9 @@ export function planCompaction(input) {
 }
 function planWith({ meta, events, nodes, messages, instructions = '', tokens = 0, window = takeoverDefaults.window, keepTokens = takeoverDefaults.keep }, recent) {
   const through = coveredThrough(nodes)
-  if(nodes.some(n=>n.first<=through&&isReducedSummary(n.summary)))return {use:false,reason:'mechanically shortened summaries are navigation only; use native compaction'}
+  // A shortened summary names its records for lcm_read and may stand for older history; the one right before
+  // the kept messages is the work in hand and must be complete.
+  if(isReducedSummary(frontier(nodes,through).at(-1)?.summary??''))return {use:false,reason:'mechanically shortened summaries are navigation only; use native compaction'}
   if (through < 0 && !recent) return { use: false, reason: 'no summaries written yet' }
   // With the dialogue carried along, every message in context is covered: the cut is at the end.
   const candidates = recent ? [messages.length] : cutCandidates(messages, events, through)

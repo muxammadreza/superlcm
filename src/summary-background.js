@@ -5,6 +5,18 @@ import {claudeTranscript} from './store.js'
 import {buildHierarchy,summarySettingsRevision,summaryEstimate,summaryWork} from './summarize.js'
 import {summarizeWith,writerTool,WRITER_CLI} from './cli-writers.js'
 import {scheduleSummary} from './summary-scheduler.js'
+import {RECENT_CHARS} from './compaction.js'
+// From half of Claude Code's compaction threshold on, an open segment that is too long to travel word for word
+// in the packet (compaction.js RECENT_CHARS) is written early, so the summaries are current when it compacts.
+export const FLUSH_AT=0.5,FLUSH_CHARS=RECENT_CHARS/2
+export function flushUnderPressure(store,id,{tokens=0,window=0}={}) {
+ const takeover=store.takeover(),limit=Math.min(window||takeover.window,takeover.window)
+ if(!takeover.enabled||!(tokens>=limit*FLUSH_AT))return false
+ const estimate=summaryEstimate(store,id)
+ if(estimate.segments||estimate.tail_chars<FLUSH_CHARS)return false
+ store.setSummaryFlush(id,store.db.prepare('SELECT MAX(ordinal) AS o FROM events WHERE session=?').get(id)?.o??-1)
+ return true
+}
 
 export function generateBackground(store,session,setting,options={}) {
  const {mode,model,api_provider,api_url,effort,api_effort,oneOffApi}=setting
@@ -25,7 +37,7 @@ function firstTranscript(id,env) {
  }
  return found.length===1?claudeTranscript(found[0],env):null
 }
-export function summaryTick(store,id,{env=process.env,spawnProcess}={}) {
+export function summaryTick(store,id,{env=process.env,spawnProcess,tokens=0,window=0}={}) {
  if(env.SUPERLCM_CLI_WORKER==='1'||!store.integrationEnabled('claude-code')||store.isDeleted(id))return {none:'disabled'}
  const source=store.source(id),file=source?.path||firstTranscript(id,env)
  if(!file||!existsSync(file))return {none:'not recorded yet'}
@@ -34,6 +46,7 @@ export function summaryTick(store,id,{env=process.env,spawnProcess}={}) {
  if(!source)store.setMetadata(id,{harness:'claude-code',externalId:id})
  const setting=store.effectiveSetting(id,env),{mode,model}=setting
  if(['off','cli','api'].includes(mode))store.setSummaryMode(id,mode)
+ if(['cli','api'].includes(mode))flushUnderPressure(store,id,{tokens,window})
  const work=summaryWork(store,id),revision=summarySettingsRevision(store,id,env)
  if(!work||store.summaryRetry(id,work.batch_id,revision))return {none:'no eligible work'}
  if(mode==='cli'&&writerTool('claude-code',env)==='claude-code'){store.setHostWriter(id,true);return {host:true}}

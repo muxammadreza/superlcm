@@ -80,6 +80,7 @@ export class ClaudeStore {
       CREATE VIRTUAL TABLE IF NOT EXISTS node_fts USING fts5(session UNINDEXED, id UNINDEXED, summary);
       CREATE TABLE IF NOT EXISTS leases(session TEXT PRIMARY KEY, until_ms INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS summary_retries(session TEXT PRIMARY KEY,batch_id TEXT NOT NULL,revision TEXT NOT NULL,attempts INTEGER NOT NULL,until_ms INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS summary_flush(session TEXT PRIMARY KEY,ordinal INTEGER NOT NULL,until_ms INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS summary_policies(session TEXT PRIMARY KEY REFERENCES sources(session), mode TEXT NOT NULL CHECK(mode IN ('off','cli','api')));
       CREATE TABLE IF NOT EXISTS session_origins(session TEXT PRIMARY KEY REFERENCES sources(session), harness TEXT NOT NULL, external_id TEXT, display_name TEXT, name_source TEXT);
       CREATE TABLE IF NOT EXISTS summary_preferences(session TEXT PRIMARY KEY REFERENCES sources(session), mode TEXT NOT NULL CHECK(mode IN ('auto','off','cli','codex-cli','api','agent')), model TEXT);
@@ -180,6 +181,10 @@ export class ClaudeStore {
     if (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='summary_errors'").get()) return null
     return this.db.prepare('SELECT detail FROM summary_errors WHERE session=?').get(session)?.detail || null
   }
+  // Context pressure, or a compaction that found the summaries behind, closes the open segment early: records
+  // up to this ordinal are written now instead of when the segment reaches its full size (src/summarize.js).
+  summaryFlush(session) { return this.db.prepare('SELECT ordinal FROM summary_flush WHERE session=? AND until_ms>?').get(session,Date.now())?.ordinal ?? null }
+  setSummaryFlush(session,ordinal,duration=3600000) { if(Number.isSafeInteger(ordinal)&&ordinal>=0)this.db.prepare('INSERT INTO summary_flush(session,ordinal,until_ms) VALUES(?,?,?) ON CONFLICT(session) DO UPDATE SET ordinal=MAX(ordinal,excluded.ordinal),until_ms=excluded.until_ms').run(session,ordinal,Date.now()+duration) }
   summaryRetry(session,batchId,revision) {
     const row=this.db.prepare('SELECT * FROM summary_retries WHERE session=? AND batch_id=? AND revision=?').get(session,batchId,revision)
     return row && (row.attempts>=3 || row.until_ms>Date.now()) ? row : null
@@ -604,7 +609,7 @@ export class ClaudeStore {
     try {
       const deliveries = this.db.prepare('SELECT id FROM deliveries WHERE source_session=? OR target_session=?').all(session, session).map(x => x.id)
       for (const id of deliveries) { this.db.prepare('DELETE FROM delivery_packets WHERE id=?').run(id); this.db.prepare('DELETE FROM deliveries WHERE id=?').run(id) }
-      for (const table of ['event_fts', 'events', 'session_event_counts', 'node_fts', 'nodes', 'leases', 'summary_retries', 'compactions', 'takeover_copies', 'host_writers', 'summary_policies', 'summary_preferences', 'session_origins', 'sources']) this.db.prepare(`DELETE FROM ${table} WHERE session=?`).run(session)
+      for (const table of ['event_fts', 'events', 'session_event_counts', 'node_fts', 'nodes', 'leases', 'summary_retries', 'summary_flush', 'compactions', 'takeover_copies', 'host_writers', 'summary_policies', 'summary_preferences', 'session_origins', 'sources']) this.db.prepare(`DELETE FROM ${table} WHERE session=?`).run(session)
       this.db.prepare('INSERT INTO deleted_sessions(session,deleted_ms) VALUES(?,?) ON CONFLICT(session) DO UPDATE SET deleted_ms=excluded.deleted_ms').run(session, Date.now())
       this.db.exec('COMMIT')
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
