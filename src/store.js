@@ -538,9 +538,27 @@ export class ClaudeStore {
     const file = realpathSync(path)
     if (!statSync(file).isFile()) throw new Error('Source is not a regular file')
     const prior = this.source(session)
-    if (prior && (prior.path !== file || prior.kind !== kind)) throw new Error('Session already bound to a different source; use a distinct session id')
+    // Claude Code moves a conversation's transcript when its folder changes (a desktop scratch workspace opened
+    // on a project, a worktree). Follow the file only when it starts with exactly the bytes already indexed.
+    if (prior && prior.kind === kind && prior.path !== file && this.#continues(session, prior.offset, file)) this.db.prepare('UPDATE sources SET path=? WHERE session=?').run(file, session)
+    else if (prior && (prior.path !== file || prior.kind !== kind)) throw new Error('Session already bound to a different source; use a distinct session id')
     this.db.prepare('INSERT OR IGNORE INTO sources(session,path,kind) VALUES(?,?,?)').run(session, file, kind)
     return file
+  }
+  // True when `file` begins with SuperLcm's private copy of this conversation, byte for byte.
+  #continues(session, offset, file) {
+    if (offset === 0) return !this.db.prepare('SELECT 1 FROM events WHERE session=? LIMIT 1').get(session)
+    const archive = this.archivePath(session)
+    if (!existsSync(archive) || statSync(archive).size < offset || statSync(file).size < offset) return false
+    const a = openSync(archive, 'r'), b = openSync(file, 'r'), x = Buffer.alloc(1024 * 1024), y = Buffer.alloc(1024 * 1024)
+    try {
+      for (let at = 0; at < offset;) {
+        const n = Math.min(x.length, offset - at)
+        if (readSync(a, x, 0, n, at) !== n || readSync(b, y, 0, n, at) !== n || !x.subarray(0, n).equals(y.subarray(0, n))) return false
+        at += n
+      }
+      return true
+    } finally { closeSync(a); closeSync(b) }
   }
   ingest(session, path, kind = 'jsonl') {
     // Serialize the cursor snapshot, archive copy and indexing across processes.
