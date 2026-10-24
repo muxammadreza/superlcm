@@ -6,6 +6,7 @@ import {detectSummaryLanguage} from './summary-language.js'
 import {buildSummaryPrompt,SUMMARY_SYSTEM} from './summary-policy.js'
 import {estimateSummaryTokens} from './summary-tokens.js'
 import {isReducedSummary} from './summary-fitting.js'
+import {isRequestCopy} from './claude-records.js'
 
 import {ids,canonical,bodies,liveMessage} from './claude-live-messages.js'
 export {liveMessage} from './claude-live-messages.js'
@@ -14,7 +15,7 @@ const messageKey=m=>rescueHash([m.role,m.text.trim(),ids(m.toolUses),ids(m.toolR
 function archivedMessages(store,session) {
   return store.eventRows(session).flatMap(e=>{
     const raw=store.exact(session,e.ordinal),record=JSON.parse(raw),role=record.message?.role||record.role||record.type
-    if(!['user','assistant'].includes(role))return []
+    if(isRequestCopy(record)||!['user','assistant'].includes(role))return []
     const content=record.message?.content??record.content
     const text=typeof content==='string'?content:Array.isArray(content)?content.filter(b=>b.type==='text').map(b=>b.text||'').join('\n'):''
     const pairing=summaryToolPairing(raw)

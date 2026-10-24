@@ -1,5 +1,6 @@
 import {userTextFromRecord,excerptUserTexts} from './summary-language.js'
 import { dshRecordCategory } from './dsh-summaries.js'
+import { isRequestCopy } from './claude-records.js'
 // Summarization reads verified originals, never the UI/search preview. Keep
 // message roles, timestamps, tool outcomes and literal whitespace intact.
 const textOf = value => typeof value === 'string' ? value : value == null ? '' : JSON.stringify(value)
@@ -24,7 +25,7 @@ export function summarySource(raw, kind = 'jsonl') {
   if (kind === 'text') return String(raw)
   let record
   try { record = JSON.parse(raw) } catch { return '' }
-  if (!record || typeof record!=='object' || Array.isArray(record)) return ''
+  if (!record || typeof record!=='object' || Array.isArray(record) || isRequestCopy(record)) return ''
   if (record.dsh_session && record.event) {
     const event=record.event
     if (dshRecordCategory(event)!=='original') return ''
@@ -63,12 +64,15 @@ export function summarySource(raw, kind = 'jsonl') {
   return `${role}${time === undefined ? '' : ` [source time: ${textOf(time)}]`}:\n${content}`
 }
 // Read pairing identifiers from verified structured originals, never rendered
-// model text. A failed tool result still closes the requested call.
+// model text. A failed tool result still closes the requested call. endsTurn
+// marks a Claude prompt the person typed, or a compaction summary: a call still
+// open there was interrupted or cut off and is never answered. Task
+// notifications arrive mid-turn and leave open calls alone.
 export function summaryToolPairing(raw, kind='jsonl') {
   const opened=[],closed=[]
   if(kind==='text')return {opened,closed}
   let record;try{record=JSON.parse(raw)}catch{return {opened,closed}}
-  if(!record||typeof record!=='object')return {opened,closed}
+  if(!record||typeof record!=='object'||isRequestCopy(record))return {opened,closed}
   const add=(list,id)=>{if(typeof id==='string'&&id)list.push(id)}
   const content=blocks=>{
     if(typeof blocks==='string'&&blocks.startsWith('\0json:')){try{blocks=JSON.parse(blocks.slice(6))}catch{return}}
@@ -93,6 +97,7 @@ export function summaryToolPairing(raw, kind='jsonl') {
     if(['tool','toolResult'].includes(role))add(closed,m.toolCallId||m.tool_call_id||m.callId)
     let calls=m.tool_calls;try{if(typeof calls==='string')calls=JSON.parse(calls)}catch{calls=[]}
     if(role==='assistant'&&Array.isArray(calls))for(const call of calls)add(opened,call.id)
+    if(record.type==='user'&&!closed.length&&(record.isCompactSummary===true||(!record.isMeta&&record.origin?.kind==='human')))return {opened,closed,endsTurn:true}
   }
   return {opened,closed}
 }

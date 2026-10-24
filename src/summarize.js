@@ -5,6 +5,7 @@ import { readOpenAICompletion, readSummaryJson, readSummaryText, summaryFailure,
 import { createHash, randomUUID } from 'node:crypto'
 import { detectSummaryLanguage, userTextFromRecord, excerptUserTexts } from './summary-language.js'
 import { summaryEvents, recentUserTexts } from './summary-source.js'
+import { isRequestCopy } from './claude-records.js'
 import {selectSummaryMerge,mergeContent} from './summary-merge.js'
 import { nodeId } from './store.js'
 import { normalizeApiEndpoint, loopbackEndpoint, EFFORTS } from './api-endpoint.js'
@@ -119,10 +120,11 @@ function segmentEnd(events, from, budget, batchSize) {
   const pending=new Set()
   for (let i = from; i < events.length; i++) {
     if (!visibleEvent(events[i])) continue
+    const pairing=events[i].toolPairing||{opened:[],closed:[]}
+    if(pairing.endsTurn)pending.clear() // calls left open by an interrupted turn are never answered
     const len = budget.tokens?estimateSummaryTokens(eventPrefix(events[i])+events[i].summaryText+'\n'):textLength(events[i])
     if (count && !pending.size && size + len > budget.target) return i - 1
     size += len; count++
-    const pairing=events[i].toolPairing||{opened:[],closed:[]}
     for(const id of pairing.opened)pending.add(id)
     for(const id of pairing.closed)pending.delete(id)
     if (!pending.size && (size >= budget.target || count >= batchSize)) return i
@@ -137,6 +139,7 @@ function flushEnd(events,from,through) {
   for(let i=from;i<events.length&&events[i].ordinal<=through;i++){
     if(!visibleEvent(events[i]))continue
     const pairing=events[i].toolPairing||{opened:[],closed:[]}
+    if(pairing.endsTurn)pending.clear()
     for(const id of pairing.opened)pending.add(id)
     for(const id of pairing.closed)pending.delete(id)
     if(!pending.size)end=i
@@ -173,7 +176,7 @@ export function summaryWork(store, session, options = {}) {
   if(end<0&&flush!==null&&flush!==undefined)end=flushEnd(events,0,flush)
   if (end >= 0) {
   const batch = events.slice(0, end + 1)
-  const language=detectSummaryLanguage(store.source(session).kind==='text'?excerptUserTexts(batch.map(e=>store.exact(session,e.ordinal)).join('')):batch.map(e=>userTextFromRecord(store.exact(session,e.ordinal))),fallback)
+  const language=detectSummaryLanguage(store.source(session).kind==='text'?excerptUserTexts(batch.map(e=>store.exact(session,e.ordinal)).join('')):batch.map(e=>store.exact(session,e.ordinal)).filter(raw=>!isRequestCopy(raw)).map(userTextFromRecord),fallback)
   const digest = hash(JSON.stringify([SUMMARY_POLICY_VERSION,language.code,...batch.map(e => e.digest)]))
   const base = { session, batch_id: nodeId(session, 0, batch[0].ordinal, batch.at(-1).ordinal, digest), level: 0, first: batch[0].ordinal, last: batch.at(-1).ordinal, children: [], digest,
     ...(store.metadata(session).harness==='dsh'?{source_records:batch.filter(visibleEvent).map(e=>e.ordinal)}:{}) }

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.36 — 2026-10-23
+
+- Fix Claude summaries freezing, and every compaction falling back to Claude Code's own, in conversations recorded by Claude Code 2.1.300+ (seen mostly in long worktree sessions). Claude Code now writes a copy of each API request into the transcript (`api-request`, `api-request-shape`, `api-request-blob`). Read as messages, the copies reopened tool calls that had already returned, so no summary segment could close. Summary text, tool pairing, summary language detection and the conversation-model rescue's archive matching now skip these copies.
+- A tool call cut off by a prompt the person typed, or by a compaction, never returns; it no longer holds the summary segment open. Task notifications still leave open calls alone.
+- Follow a Claude transcript that Claude Code moves when a session's folder changes (resuming in the main folder after a worktree, or a desktop scratch workspace opened on a project), instead of failing with “Session already bound to a different source” and freezing capture. The new file is followed only when it starts with the already-indexed bytes.
+
 ## 0.5.35 — 2026-10-16
 
 - 修复 DSH 最后一个小摘要分块无法节省空间时阻塞已完成摘要的问题。小尾段保留原文，明确收窄实际提交范围，并在重载后复用已完成草稿。
