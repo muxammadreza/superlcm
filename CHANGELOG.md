@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.37 — 2026-10-23
+
+- Fix summaries of Persian conversations coming out in Arabic. Summary language detection only looked at the script, so Persian, Arabic and Urdu all became “the user's Arabic-script language”, and models read that as Arabic. Detection now tells the three apart by the letters only one of them uses (Persian پ چ ژ گ ک ی, Arabic ة ك ي ى, Urdu ٹ ڈ ڑ ں ے) and names the language in the prompt; text that doesn't settle it keeps the script-only instruction. A summary written in the wrong one of the three is rejected, and the original content is kept. Summaries already written are not changed.
+
 ## 0.5.36 — 2026-10-23
 
 - Fix Claude summaries freezing, and every compaction falling back to Claude Code's own, in conversations recorded by Claude Code 2.1.300+ (seen mostly in long worktree sessions). Claude Code now writes a copy of each API request into the transcript (`api-request`, `api-request-shape`, `api-request-blob`). Read as messages, the copies reopened tool calls that had already returned, so no summary segment could close. Summary text, tool pairing, summary language detection and the conversation-model rescue's archive matching now skip these copies.

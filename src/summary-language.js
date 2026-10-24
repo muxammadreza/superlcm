@@ -2,7 +2,7 @@
 // Keep this module dependency-free so the standalone DSH package uses the same policy.
 const languages = {
  en:['English','Latin'], zh:['Chinese','Han'], ja:['Japanese','Kana'], ko:['Korean','Hangul'],
- ru:['Russian','Cyrillic'], ar:['Arabic','Arabic'], hi:['Hindi','Devanagari'], th:['Thai','Thai'],
+ ru:['Russian','Cyrillic'], ar:['Arabic','Arabic'], fa:['Persian','Arabic'], ur:['Urdu','Arabic'], hi:['Hindi','Devanagari'], th:['Thai','Thai'],
  es:['Spanish','Latin'], fr:['French','Latin'], de:['German','Latin'], pt:['Portuguese','Latin'],
  it:['Italian','Latin'], cyrl:["the user's Cyrillic-script language",'Cyrillic'], arab:["the user's Arabic-script language",'Arabic'], deva:["the user's Devanagari-script language",'Devanagari'], und:[null,null],
 }
@@ -39,6 +39,13 @@ export function userTextsFromMessages(messages, skipIds=new Set()) {
   return (messages||[]).filter(m=>m?.role==='user'&&!skipIds.has(m.id)).map(m=>userTextFromRecord(m)).filter(Boolean)
 }
 const scripts = {Han:/\p{Script=Han}/gu,Kana:/[\p{Script=Hiragana}\p{Script=Katakana}]/gu,Hangul:/\p{Script=Hangul}/gu,Latin:/\p{Script=Latin}/gu,Cyrillic:/\p{Script=Cyrillic}/gu,Arabic:/\p{Script=Arabic}/gu,Devanagari:/\p{Script=Devanagari}/gu,Thai:/\p{Script=Thai}/gu}
+// Persian, Arabic and Urdu share a script; the letters only one of them uses decide which it is.
+const arabicLetters={ur:/[\u0679\u0688\u0691\u06BA\u06D2]/gu,fa:/[\u067E\u0686\u0698\u06AF\u06A9\u06CC]/gu,ar:/[\u0629\u0643\u064A\u0649]/gu}
+function arabicScriptLanguage(text){
+  const n=Object.fromEntries(Object.entries(arabicLetters).map(([code,re])=>[code,count(text,re)]))
+  if(n.ur>=3)return 'ur'
+  return n.fa>=3&&n.fa>n.ar*2?'fa':n.ar>=3&&n.ar>n.fa*2?'ar':'arab'
+}
 const stopWords={en:'the and is are to of in for with this that please should would can not',es:'el la los las que para por una como quiero pero',fr:'le les une des est pour avec dans vous nous veuillez',de:'der die das und ist nicht bitte mit eine ich',pt:'os uma para com não você quero são',it:'gli della delle una che per con non sono vorrei'}
 function sample(texts){return (Array.isArray(texts)?texts:[texts]).filter(x=>typeof x==='string').slice(-24).map(x=>cleanUserText(x).slice(-8000)).join('\n').slice(-32000)}
 export function detectSummaryLanguage(texts, fallback=[]) {
@@ -49,7 +56,7 @@ export function detectSummaryLanguage(texts, fallback=[]) {
   if(n.Kana>=2&&n.Kana+n.Han>n.Latin*.3)return languageInfo('ja')
   if(n.Hangul>=3&&n.Hangul>n.Latin*.3)return languageInfo('ko')
   for(const [script,code] of [['Han','zh'],['Cyrillic','cyrl'],['Arabic','arab'],['Devanagari','deva'],['Thai','th']])
-    if(n[script]>=3&&n[script]>=n.Latin*.3)return languageInfo(code)
+    if(n[script]>=3&&n[script]>=n.Latin*.3)return languageInfo(code==='arab'?arabicScriptLanguage(text):code)
   if(n.Latin>=8){
     const words=text.toLowerCase().match(/\p{L}+/gu)||[],set=new Set(words)
     const ranked=Object.entries(stopWords).map(([code,list])=>[code,list.split(' ').filter(w=>set.has(w)).length]).sort((a,b)=>b[1]-a[1])
@@ -79,14 +86,14 @@ export function checkSummaryLanguage(text, language) {
     return own===0 && (h.Latin>0||Object.entries(h).some(([script,value])=>script!=='Latin'&&script!==info.script&&value>=2))
   })
   const outputLanguage=detectSummaryLanguage([prose])
-  const namedLatin=['en','es','fr','de','pt','it']
+  const namedLatin=['en','es','fr','de','pt','it'],namedArabic=['fa','ar','ur']
   const foreign=Object.entries(n).filter(([script])=>script!==info.script && !(info.script==='Kana'&&script==='Han')).reduce((sum,[,value])=>sum+value,0)
   const mismatch=info.script==='Latin' ?
     headingMismatch || foreign>=20&&foreign>total*.25 || namedLatin.includes(info.code)&&namedLatin.includes(outputLanguage.code)&&outputLanguage.code!==info.code
     : info.script==='Han'?n.Kana+n.Hangul>=20&&n.Kana+n.Hangul>total*.25 || n.Han<Math.max(3,total*.15)&&total>=40
     : info.script==='Kana'?n.Kana+n.Han<total*.15&&total>=40 || n.Kana<2&&total>=40
     : info.script==='Hangul'?n.Hangul<Math.max(3,total*.15)&&total>=40
-    : n[info.script]<Math.max(3,total*.15)&&total>=40
+    : n[info.script]<Math.max(3,total*.15)&&total>=40 || namedArabic.includes(info.code)&&namedArabic.includes(outputLanguage.code)&&outputLanguage.code!==info.code
   if(mismatch||headingMismatch){const error=new Error(`Summary language mismatch: expected ${info.name}; original content retained`);error.summaryQuality=true;throw error}
 }
 
