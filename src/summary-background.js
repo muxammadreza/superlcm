@@ -1,4 +1,4 @@
-import {existsSync,readdirSync} from 'node:fs'
+import {existsSync,readdirSync,openSync,fstatSync,readSync,closeSync} from 'node:fs'
 import {join} from 'node:path'
 import {homedir} from 'node:os'
 import {claudeTranscript} from './store.js'
@@ -6,6 +6,46 @@ import {buildHierarchy,summarySettingsRevision,summaryEstimate,summaryWork} from
 import {summarizeWith,writerTool,WRITER_CLI} from './cli-writers.js'
 import {scheduleSummary,mainForkDue} from './summary-scheduler.js'
 import {RECENT_CHARS} from './compaction.js'
+
+// 缓存过期压缩: Claude Code keeps the main thread's prompt cache for an hour after its last request. Past that,
+// the next prompt writes the whole context to the cache again, so a takeover compaction then costs no cache:
+// only the smaller packet is written. It is worth it from COLD_SHARE of the compaction window.
+export const COLD_IDLE_MS=3600000+120000, COLD_SHARE=.4
+// The newest main-thread response in a transcript (rows may be appended out of order around a compaction),
+// its context size, and whether a compaction followed it.
+export function lastMainResponse(file,{tailBytes=4*1024*1024}={}) {
+ let text
+ try{
+  const fd=openSync(file,'r')
+  try{const size=fstatSync(fd).size,start=Math.max(0,size-tailBytes),buf=Buffer.alloc(size-start);readSync(fd,buf,0,buf.length,start);text=buf.toString('utf8')}
+  finally{closeSync(fd)}
+ }catch{return null}
+ let at=0,tokens=0,boundary=0
+ for(const line of text.split('\n')){
+  if(!line.includes('"assistant"')&&!line.includes('compact_boundary'))continue
+  let r;try{r=JSON.parse(line)}catch{continue}
+  const ms=Date.parse(r.timestamp)
+  if(r.isSidechain||!Number.isFinite(ms))continue
+  if(r.type==='system'&&r.subtype==='compact_boundary'){boundary=Math.max(boundary,ms);continue}
+  let u=r.type==='assistant'&&r.message?.model!=='<synthetic>'?r.message?.usage:null
+  if(!u||ms<at)continue
+  const sum=x=>(x.input_tokens||0)+(x.cache_read_input_tokens||0)+(x.cache_creation_input_tokens||0)
+  if(!sum(u)&&Array.isArray(u.iterations)&&u.iterations.length)u=u.iterations.at(-1)
+  at=ms;tokens=sum(u)+(u.output_tokens||0)
+ }
+ return at?{at,tokens,compactedSince:boundary>at}:null
+}
+export function coldCompactionDue(store,id,{env=process.env,tokens=0,window=0,now=Date.now()}={}) {
+ if(env.SUPERLCM_CLI_WORKER==='1'||!store.integrationEnabled('claude-code')||store.isDeleted(id)||store.metadata(id).harness!=='claude-code')return {none:'disabled'}
+ const takeover=store.takeover(),file=store.source(id)?.path
+ if(!takeover.enabled)return {none:'takeover off'}
+ const last=file&&lastMainResponse(file)
+ if(!last)return {none:'no response yet'}
+ if(last.compactedSince)return {none:'already compacted'}
+ if(now-last.at<COLD_IDLE_MS)return {none:'cache still warm'}
+ const limit=takeover.ratio!=null&&window>0?window*takeover.ratio:Math.min(window||takeover.window,takeover.window),size=Math.max(tokens,last.tokens)
+ return size>=limit*COLD_SHARE?{compact:true,tokens:size}:{none:'context small'}
+}
 
 export function flushUnderPressure(store,id,{tokens=0,window=0}={}) {
  const takeover=store.takeover(),limit=Math.min(window||takeover.window,takeover.window)

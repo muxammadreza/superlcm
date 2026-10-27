@@ -96,6 +96,7 @@ const LANGS = {
     "部分摘要已机械缩短，仅供查询导航；关键约束请查回原文。": "Some summaries were mechanically shortened for navigation only. Read the originals for critical constraints.",
     "最近接管判断：SuperLcm 已提供摘要": "Last takeover decision: SuperLcm supplied summaries",
     "（预计算）": "(precompute)",
+    "（缓存已过期）": "(after the cache expired)",
     "最近接管判断：发生错误，交回 Claude Code": "Last takeover decision: error; handed back to Claude Code",
     "最近接管判断：使用 Claude Code 原生压缩": "Last takeover decision: Claude Code native compaction",
     "压缩设置尚未应用，请重启或重新加载 DSH 插件": "Compaction settings are pending. Restart DSH or reload the plugin.",

@@ -154,7 +154,7 @@ function planWith({ meta, events, nodes, messages, instructions = '', tokens = 0
   // Each message's share of Claude Code's own token count, by its size in characters.
   const size = m => m.size ?? (m.text.length + 200)
   const total = messages.reduce((s, m) => s + size(m), 0) || 1
-  const target=trigger==='manual'?Math.min(window*TARGET_AFTER,tokens*.5):window*TARGET_AFTER
+  const target=trigger==='manual'||trigger==='cold'?Math.min(window*TARGET_AFTER,tokens*.5):window*TARGET_AFTER
   // The newest keepTokens (at most half of the context) also stay word for word, from the start of a turn,
   // even where summaries already cover them, so the work in hand continues with its full detail.
   const widen=start=>{
@@ -179,7 +179,7 @@ function planWith({ meta, events, nodes, messages, instructions = '', tokens = 0
     if(!packet)return {use:false,reason:'complete request and packet exceed safe size; use native compaction'}
     const kept=messages.slice(at).reduce((s,m)=>s+size(m),0)
     const after=Math.round(tokens*kept/total+estimateSummaryTokens(packet))
-    if(after>window*MAX_AFTER)return {use:false,reason:`the compacted context is too large: about ${after} tokens would remain`}
+    if(after>window*MAX_AFTER)return {use:false,reason:`the compacted context is too large: about ${after} tokens would remain`,after}
     return {use:true,packet,start:at,keep,through:recent?recent.last:through,after,...(recent?{recent:true}:{}),...(request?{inTurn:true}:{})}
   }
   // A later cut than the covered boundary would drop unsummarized messages.

@@ -259,7 +259,7 @@ export class ClaudeStore {
   noteCompaction(session,{status,code,reason,through=-1,records=0,before=0,trigger='unknown',stage='first',pendingSegments=null,pending=pendingSegments,after=null,catchupMs=null,catchup_ms=catchupMs,coverage_lag=null}) {
     this.db.exec('CREATE TABLE IF NOT EXISTS compaction_diagnostics(session TEXT PRIMARY KEY,status TEXT NOT NULL,code TEXT NOT NULL,reason TEXT NOT NULL,at_ms INTEGER NOT NULL,through_record INTEGER NOT NULL,records INTEGER NOT NULL,before_tokens INTEGER NOT NULL,trigger TEXT NOT NULL)')
     this.db.exec('CREATE TABLE IF NOT EXISTS compaction_history(session TEXT NOT NULL,at_ms INTEGER NOT NULL,status TEXT NOT NULL,code TEXT NOT NULL,reason TEXT NOT NULL,stage TEXT NOT NULL,through_record INTEGER NOT NULL,records INTEGER NOT NULL,coverage_lag INTEGER NOT NULL,pending_segments INTEGER,before_tokens INTEGER NOT NULL,after_tokens INTEGER,catchup_ms INTEGER,trigger TEXT NOT NULL); CREATE INDEX IF NOT EXISTS compaction_history_session_at ON compaction_history(session,at_ms)')
-    const at=Date.now(),safeTrigger=['auto','manual','precompute'].includes(trigger)?trigger:'unknown'
+    const at=Date.now(),safeTrigger=['auto','manual','precompute','cold'].includes(trigger)?trigger:'unknown'
     const number=n=>Number.isFinite(n)&&n>=0?Math.round(n):null
     this.db.exec('SAVEPOINT compaction_note')
     try {

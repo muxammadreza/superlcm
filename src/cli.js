@@ -17,7 +17,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { scheduleSummary, drainSummaryQueue } from './summary-scheduler.js'
 import { enqueueSummaryRun, reserveSummaryRun, bindSummaryRun, progressSummaryRun, finishSummaryRun, activeSummaryRun, summaryConcurrency } from './summary-runs.js'
-import { summaryTick, catchUp, catchupDeadlineMs, pendingLeaves } from './summary-background.js'
+import { summaryTick, catchUp, catchupDeadlineMs, pendingLeaves, coldCompactionDue, lastMainResponse, COLD_IDLE_MS } from './summary-background.js'
 import { claimHostFork, settleHostFork } from './main-fork.js'
 import { randomUUID } from 'node:crypto'
 import {claudeCompactionNodes} from './claude-checkpoints.js'
@@ -262,20 +262,26 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
         const context=verifiedCompactionInput(store,session,input.messages||[])
         return planCompaction({meta:store.metadata(session),events:context.events,nodes:claudeCompactionNodes(store,session),messages:context.messages,instructions:input.instructions||'',tokens:input.tokens||0,window:current.ratio!=null?(input.window||0)*current.ratio:Math.min(input.window||current.window,current.window),keepTokens:current.keep,trigger:input.trigger})
       }
-      const note=(result,stage,catchupMs=null)=>store.noteCompaction(session,{...compactionDiagnostic(result,{nodes:store.nodeRows(session,0),records:store.stats(session).records,before:input.tokens||0,trigger:input.trigger}),stage:stage||(result.stage==='inline'||result.inline?'inline':'first'),pending:pendingLeaves(store,session),after:result.after??null,catchupMs})
+      // A compaction after the cache expired that does not happen leaves no record: nothing compacted natively.
+      const note=(result,stage,catchupMs=null)=>input.trigger==='cold'&&!result.use?null:store.noteCompaction(session,{...compactionDiagnostic(result,{nodes:store.nodeRows(session,0),records:store.stats(session).records,before:input.tokens||0,trigger:input.trigger}),stage:stage||(result.stage==='inline'||result.inline?'inline':'first'),pending:pendingLeaves(store,session),after:result.after??null,catchupMs})
       const notePlan=(result,stage,ms=null)=>{
         if(result.initial){note(result.initial,stage||'first',ms);note(result,'inline',ms)}
         else note(result,stage,ms)
       }
-      reply=plan()
+      // A turn can start between the module's cold-check and this compaction: then the cache is warm again.
+      const cold=input.trigger==='cold',idle=()=>{const last=lastMainResponse(src.path);return !!last&&Date.now()-last.at>=COLD_IDLE_MS}
+      reply=cold&&!idle()?{use:false,reason:'the session was used again after its cache expired'}:plan()
+      // After the cache expired, compacting pays only when the packet is at most half of what would be re-cached.
+      if(cold&&reply.use&&reply.after>(input.tokens||0)*.5)reply={use:false,reason:'a compaction after the cache expired would not halve the context'}
       notePlan(reply,input.afterCatchup?'catchup':null,input.afterCatchup&&Number.isFinite(input.catchupMs)?input.catchupMs:null)
       const eligible=['coverage_lag','uncovered_oldest','no_summaries','context_too_large'].includes(compactionDiagnostic(reply).code)
       const chosen=effective(store,session),harness=store.metadata(session).harness
-      const mayWrite=store.integrationEnabled(harness)&&harness==='claude-code'&&['cli','api'].includes(chosen.mode)
+      // One after the cache expired schedules nothing: it is skipped, not handed to Claude Code.
+      const mayWrite=!cold&&store.integrationEnabled(harness)&&harness==='claude-code'&&['cli','api'].includes(chosen.mode)
       if(!reply.use&&!reply.ambiguous&&eligible&&mayWrite){
         store.setSummaryFlush(session,store.db.prepare('SELECT MAX(ordinal) AS o FROM events WHERE session=?').get(session)?.o??-1)
       }
-      if(input.trigger!=='precompute'&&!input.afterCatchup&&!reply.use&&!reply.ambiguous&&reply.stage!=='inline'&&!reply.inline&&eligible){
+      if(input.trigger!=='precompute'&&!cold&&!input.afterCatchup&&!reply.use&&!reply.ambiguous&&reply.stage!=='inline'&&!reply.inline&&eligible){
         const pending=pendingLeaves(store,session),deadlineMs=catchupDeadlineMs(),chosen=effective(store,session),harness=store.metadata(session).harness
         if(deadlineMs>0&&pending>=1&&pending<=4&&store.integrationEnabled(harness)&&['cli','api'].includes(chosen.mode)){
           if(chosen.mode==='cli'&&writerTool(harness)==='claude-code')reply={...reply,catchup:{host:true,deadlineMs,maxPieces:4}}
@@ -300,7 +306,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
         }
       }
       if(reply.use)store.noteTakeover(session,input.tokens||0,reply.after||0)
-      else if(chosen.mode!=='main-fork'&&!reply.ambiguous&&store.integrationEnabled('claude-code')&&store.metadata(session).harness==='claude-code'&&['coverage_lag','uncovered_oldest','no_summaries','context_too_large','unplaced_boundary'].includes(compactionDiagnostic(reply).code))reply.rescue=true
+      else if(!cold&&chosen.mode!=='main-fork'&&!reply.ambiguous&&store.integrationEnabled('claude-code')&&store.metadata(session).harness==='claude-code'&&['coverage_lag','uncovered_oldest','no_summaries','context_too_large','unplaced_boundary'].includes(compactionDiagnostic(reply).code))reply.rescue=true
     }
     if(src&&(!setting.enabled||store.isDeleted(session)))store.noteCompaction(session,compactionDiagnostic(reply,{nodes:store.nodeRows(session,0),records:store.stats(session).records,before:input.tokens||0,trigger:input.trigger}))
   } catch(error) { reply={use:false,reason:'compaction planner failed; originals retained',error:true};if(rest[0]&&store.source(rest[0]))store.noteCompaction(rest[0],compactionDiagnostic(reply,{records:store.stats(rest[0]).records})) }
@@ -311,6 +317,14 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
   let reply
   const flag=name=>{const at=rest.indexOf(name),n=at<0?0:Number(rest[at+1]);return Number.isSafeInteger(n)&&n>0?n:0}
   try{reply=summaryTick(store,rest[0],{tokens:flag('--tokens'),window:flag('--window'),fork:rest.includes('--fork')})}catch{reply={error:'Summary tick failed; originals retained'}}
+  finally{store.close()}
+  process.stdout.write(JSON.stringify(reply)+'\n')
+} else if (command==='cold-check') {
+  // 缓存过期压缩 (hooks/compact-mod.js): whether this idle session should compact now that its cache expired.
+  const store=new ClaudeStore()
+  let reply
+  const flag=name=>{const at=rest.indexOf(name),n=at<0?0:Number(rest[at+1]);return Number.isSafeInteger(n)&&n>0?n:0}
+  try{reply=rest[0]&&store.source(rest[0])?coldCompactionDue(store,rest[0],{tokens:flag('--tokens'),window:flag('--window')}):{none:'not recorded'}}catch{reply={none:'check failed'}}
   finally{store.close()}
   process.stdout.write(JSON.stringify(reply)+'\n')
 } else if (command==='fork-claim'||command==='fork-settle') {

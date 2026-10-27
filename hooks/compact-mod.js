@@ -5,9 +5,13 @@ import {rescueClaude,discardClaudeRescue} from './claude-rescue.js'
 // 接管压缩: when the main conversation compacts, SuperLcm answers with its own summaries plus the newest
 // messages word for word (see src/compaction.js). Anything unexpected, the setting being off, a subagent, or
 // summaries that lag behind, hands the compaction back to Claude Code. When it compacts is Claude Code's
-// own threshold, which the console sets (src/takeover.js). The module does not start a compaction itself:
-// Claude Code skips the calling plugin's hooks on a plugin's $.session.compact(), so one started here would
-// always be Claude Code's own summary.
+// own threshold, which the console sets (src/takeover.js), except after the cache expired (below). The
+// module never calls $.session.compact(): Claude Code skips the calling plugin's hooks there, so that one
+// would always be Claude Code's own summary.
+// 缓存过期压缩: the main thread's prompt cache lasts an hour after a request last read it. A session left
+// idle longer writes its whole context to the cache again on the next prompt, so the module compacts it
+// first with /compact ($.command.run, answered by this module's session.compact like a manual one) and
+// only the smaller packet is written. One SuperLcm cannot answer is skipped, never handed to Claude Code.
 // 本工具后台写: throttled steps and completed turns write waiting pieces with $.model.complete, on the
 // session's own login and without starting another Claude Code; the turn does not wait for it. What is left
 // when the session ends, or after a failed call, goes to the separate `claude -p` worker as before.
@@ -33,7 +37,7 @@ const refusedBlocks = error => /model\.complete: takes/.test(String(error?.messa
 // $ may only appear at a call site, so $.model.fork cannot be probed. A Claude Code without it throws a
 // TypeError on the first fork; this process then stops offering forks and that one goes to `claude --resume`.
 let forkMissing = false
-const writing = new Map(), ticked = new Map(), ticking = new Set(), ended = new Set()
+const writing = new Map(), ticked = new Map(), ticking = new Set(), ended = new Set(), busy = new Set()
 const outputs = new Map()
 function live(state) {
   state.controller.signal.throwIfAborted()
@@ -172,7 +176,34 @@ async function forkSummaries($, id) {
     state.claim = null
   } catch {
     if (state.claim) try { await settle({ reason: 'error' }) } catch {}
-  } finally { if (forking.get(id) === state) forking.delete(id) }
+  } finally {
+    if (forking.get(id) === state) forking.delete(id)
+    // The fork read the main thread's cache, so its hour starts again now.
+    if (!busy.has(id)) watchIdle($, id)
+  }
+}
+// 缓存过期压缩: the timer runs from the last request that read the main thread's cache (a turn's end, or a
+// fork's), past COLD_IDLE_MS in src/summary-background.js, which `cold-check` then confirms from the transcript.
+const COLD_AFTER_MS = 3750000
+const idle = new Map(), coldRuns = new Set()
+function stopIdle(id) { idle.get(id)?.cancel(); idle.delete(id) }
+function watchIdle($, id, ms = COLD_AFTER_MS) {
+  stopIdle(id)
+  if (ended.has(id) || busy.has(id)) return
+  try { idle.set(id, $.clock.after(ms, () => coldCompact($, id))) } catch {}
+}
+async function coldCompact($, id) {
+  idle.delete(id)
+  if (ended.has(id) || busy.has(id) || forking.has(id) || coldRuns.has(id)) return
+  try {
+    // Summaries still being written go into the packet.
+    await writing.get(id)?.run
+    const u = await $.session.usage()
+    const due = await cli($, 'cold-check', id, '', { flags: ['--tokens', String(u?.context?.tokens || 0), '--window', String(u?.context?.window || 0)] })
+    if (!due.compact || ended.has(id) || busy.has(id) || forking.has(id)) return
+    coldRuns.add(id)
+    await $.command.run({ command: 'compact' })
+  } catch {} finally { coldRuns.delete(id) }
 }
 function summaryTick($,id) {
   const now=Date.now()
@@ -181,7 +212,15 @@ function summaryTick($,id) {
   void Promise.resolve().then(()=>$.session.usage()).then(u=>['--tokens',String(u?.context?.tokens||0),'--window',String(u?.context?.window||0)],()=>[])
     .then(flags=>cli($,'summary-tick',id,'',{flags:forkMissing?flags:[...flags,'--fork']})).then(reply=>{if(ended.has(id))return;if(reply.fork)return forkSummaries($,id);if(reply.host)return writeSummaries($,id)}).catch(()=>{}).finally(()=>ticking.delete(id))
 }
-const toInput = messages => messages.map(m => ({ role: m.role, text: m.text.slice(0, 2000), toolUses:(m.toolUses||[]).map(t=>({tool_use_id:t.tool_use_id||t.id||t.call_id})),toolResultIds:m.toolResultIds||(m.toolResults||[]).map(t=>t.tool_use_id||t.id||t.call_id).filter(Boolean),toolResults: m.toolResults?.length ? 1 : 0, size: m.text.length + JSON.stringify(m.toolUses || []).length + JSON.stringify(m.toolResults || []).length + 200 }))
+// A message's size as the model reads it: text, tool inputs and tool output text. A tool result's `result`
+// (the tool's raw toolUseResult) is left out: it can hold an image's base64 or an edited file's whole
+// original, which the model never reads, and made a short tail look too large to keep. An image counts as
+// about 1,600 tokens.
+const IMAGE_CHARS = 6400
+const images = (value, depth = 0) => !value || typeof value !== 'object' || depth > 3 ? 0 : value.type === 'image' ? 1 : Object.values(value).reduce((n, v) => n + images(v, depth + 1), 0)
+const sizeOf = m => m.text.length + 200 + (m.toolUses || []).reduce((n, t) => n + JSON.stringify(t.input ?? '').length, 0)
+  + (m.toolResults || []).reduce((n, t) => n + String(t.text ?? '').length + images(t.result) * IMAGE_CHARS, 0)
+const toInput = messages => messages.map(m => ({ role: m.role, text: m.text.slice(0, 2000), toolUses:(m.toolUses||[]).map(t=>({tool_use_id:t.tool_use_id||t.id||t.call_id})),toolResultIds:m.toolResultIds||(m.toolResults||[]).map(t=>t.tool_use_id||t.id||t.call_id).filter(Boolean),toolResults: m.toolResults?.length ? 1 : 0, size: sizeOf(m) }))
 async function packet($, id, messages, instructions, trigger, extra = {}) {
   const usage = await $.session.usage()
   const input = JSON.stringify({ messages: toInput(messages), instructions: instructions || '', trigger, tokens: usage.context.tokens || 0, window: usage.context.window || 0,...extra })
@@ -190,11 +229,17 @@ async function packet($, id, messages, instructions, trigger, extra = {}) {
 }
 export function register(on) {
   on('session.start', async ($, e, next) => {
-    try { if (!e.agentId){const id=await $.session.id();ended.delete(id);await cli($, 'summary-host',id,'',{flags:forkMissing?[]:['--fork']})} } catch {}
+    try { if (!e.agentId){const id=await $.session.id();ended.delete(id);await cli($, 'summary-host',id,'',{flags:forkMissing?[]:['--fork']})
+      // A resumed session may have been idle past its cache already.
+      watchIdle($,id,5000)} } catch {}
+    return next(e)
+  })
+  on('turn.start', async ($, e, next) => {
+    if (!e.agentId) Promise.resolve().then(() => $.session.id()).then(id => { busy.add(id); stopIdle(id) }).catch(() => {})
     return next(e)
   })
   on('turn.complete', async ($, e, next) => {
-    if (!e.agentId) $.session.id().then(id => writeSummaries($, id)).catch(() => {})
+    if (!e.agentId) $.session.id().then(id => { busy.delete(id); watchIdle($, id); return writeSummaries($, id) }).catch(() => {})
     return next(e)
   })
   on('turn.step', async function* ($, e, next) {
@@ -207,7 +252,7 @@ export function register(on) {
       const id=await $.session.id(),state=writing.get(id),fork=forking.get(id)
       ended.add(id)
       outputs.delete(id);discardClaudeRescue(id)
-      ticked.delete(id)
+      ticked.delete(id);stopIdle(id);busy.delete(id)
       if(fork?.claim){const {claim_id,run_id}=fork.claim;fork.claim=null;try{await cli($,'fork-settle',id,JSON.stringify({claim_id,run_id,reason:'session-ended'}))}catch{}}
       if(state){state.handoff=true;state.controller.abort(Error('Session ended'))}
       else await cli($,'summary-handoff',id)
@@ -219,10 +264,12 @@ export function register(on) {
     // kept and swapped in at the threshold without asking again) is answered too: when the summaries are
     // ready, ours is what gets kept; when they are not, Claude Code prepares its own as usual.
     if (e.agentId) return next(e)
-    let plan,id
+    // The /compact this module ran after the cache expired (coldCompact).
+    let plan,id,cold=e.trigger==='manual'&&coldRuns.size>0
     try {
       id=await $.session.id()
-      plan = await packet($, id, e.messages, e.instructions, e.trigger)
+      cold&&=coldRuns.has(id)
+      plan = await packet($, id, e.messages, e.instructions, cold ? 'cold' : e.trigger)
       // Native precompute is kept until the threshold without dispatching this
       // hook again. Defer only eligible, active summary work and never rescue
       // merely for precompute. Actual pressure still has bounded native handoff.
@@ -241,10 +288,11 @@ export function register(on) {
         finally{clearTimeout(timer);if(cancel)e.signal.removeEventListener('abort',cancel)}
         plan=await packet($,id,e.messages,e.instructions,e.trigger,{afterCatchup:true,catchupMs:Date.now()-started})
       }
-      if(e.trigger!=='precompute'&&!plan?.use&&plan?.rescue&&!ended.has(id)&&!e.signal?.aborted)plan=await rescueClaude(rescueHost($),id,e)||plan
-    } catch { plan = null;try{await cli($,'compact-diagnostic',await $.session.id())}catch{} }
+      if(!cold&&e.trigger!=='precompute'&&!plan?.use&&plan?.rescue&&!ended.has(id)&&!e.signal?.aborted)plan=await rescueClaude(rescueHost($),id,e)||plan
+    } catch { plan = null;if(!cold)try{await cli($,'compact-diagnostic',await $.session.id())}catch{} }
     if (!ended.has(id)&&!e.signal?.aborted&&plan?.use && plan.start > 0 && plan.start < e.messages.length)
       return { messages: [{ role: 'user', text: plan.packet, toolUses: [] }, ...e.messages.slice(plan.start)] }
+    if (cold) return { skip: `SuperLcm: ${plan?.reason || 'no compaction needed'}` }
     return next(e)
   })
 }
