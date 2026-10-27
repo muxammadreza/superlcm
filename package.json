@@ -1,6 +1,6 @@
 {
   "name": "superlcm-mcp",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Shared local archive for Claude Code, Codex, Pi and dsh: main-model background branch summaries, exact-source recall and optional compaction takeover.",
   "type": "module",
   "publishConfig": {

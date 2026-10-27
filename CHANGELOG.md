@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.1 — 2026-10-27
+
+- Compact idle Claude Code conversations after their prompt cache expires. Past the cache's lifetime the next prompt writes the whole context to the cache again, so a takeover compaction then costs no cache, only the smaller packet. Expiry is decided from evidence, not a fixed timer: the transcript's last main-thread response, the longest cache lifetime its responses wrote (1 hour or 5 minutes), and every request the compaction module sees billed to the session while it is idle. A `$.model.fork` (SuperLcm's, Claude Code's, or another mod's keep-warm ping) never shows in the transcript but raises the session's cost, so any rise counts as a read of the cache and keeps it warm. The module compacts only when the context is at least 40% of the takeover window and the packet at least halves it. A compaction SuperLcm cannot answer then is skipped, never handed to Claude Code, and not tried again until the next response. It never runs in SuperLcm's own workers.
+- Fix takeover compactions in image-heavy sessions falling back to Claude Code's own as "context too large". The module counted each tool result's raw `result` (an image's base64, an edited file's whole original), which the model never reads. Sizes now count text, tool inputs and tool output text, plus about 1,600 tokens per image. Two recorded fallbacks replayed: about 284K → 62K and 219K → 84K tokens, both now takeovers.
+- Fix compactions of a conversation the Claude app continued under a new ID going native with `unplaced_boundary`. Its context opens with the parent's packet and the parent's records, so when its own summaries cannot place the boundary, the parent's are used (history stage `parent`, with the parent's coverage). A continued conversation no hook recorded yet is now recorded when it compacts.
+- Cut summary-writer cache misses. The in-session writer sends cached prompt blocks (policy and source cached, task not), and its repair request keeps the first request's prefix. In main-fork mode the compaction module writes the summary tree with `$.model.fork`, which reads the history from the main thread's cache; `claude --resume` stays the fallback. One-shot `claude -p` writers no longer write an hour of cache that is never read, or load the user's CLAUDE.md.
+
 ## 0.6.0 — 2026-10-24
 
 - 统一 Claude Code、Pi、DSH 压缩页；Pi/DSH 增加最近原文保留量，按当前对话预算缩小目标，保留工具组边界。摘要粒度与每组摘要合并数量只从全局“设置”读取；配置变化使已准备结果失效。
