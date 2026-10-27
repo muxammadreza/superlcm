@@ -1,5 +1,5 @@
-import { fitSummary, repairSummaryPrompt } from '../src/summary-fitting.js'
-import { checkedSummary } from '../src/summary-policy.js'
+import { fitSummary, repairSummaryPromptParts } from '../src/summary-fitting.js'
+import { checkedSummary, joinSummaryPrompt } from '../src/summary-policy.js'
 import {rescueClaude,discardClaudeRescue} from './claude-rescue.js'
 // A Claude Code module (2.1.286+), two jobs:
 // 接管压缩: when the main conversation compacts, SuperLcm answers with its own summaries plus the newest
@@ -23,6 +23,16 @@ const rescueHost = $ => ({
   complete: options => $.model.complete(options),
 })
 const MAX_PIECES = 2000 // a whole backlog in one background run (one at a time per session); turns never wait for it
+// $.model.complete sends a string prompt with no cache breakpoint. As blocks, the shared policy and the piece's
+// source are cached, so every piece reuses the policy and a retry or re-claim of the same piece reads its source.
+// A Claude Code without prompt blocks refuses them; it then gets the same text as one string.
+let plainPrompt = false
+const hostPrompt = parts => typeof parts === 'string' ? parts : plainPrompt ? joinSummaryPrompt(parts)
+  : [{ text: parts.prefix, cache: true }, { text: parts.source, cache: true }, { text: parts.tail + parts.closing }]
+const refusedBlocks = error => /model\.complete: takes/.test(String(error?.message))
+// $ may only appear at a call site, so $.model.fork cannot be probed. A Claude Code without it throws a
+// TypeError on the first fork; this process then stops offering forks and that one goes to `claude --resume`.
+let forkMissing = false
 const writing = new Map(), ticked = new Map(), ticking = new Set(), ended = new Set()
 const outputs = new Map()
 function live(state) {
@@ -80,7 +90,7 @@ async function writeLoop($, id, state) {
       const flags=[...(state.leafOnly?['--leaf']:[]),...(state.deadline?['--deadline',String(state.deadline)]:[])]
       const claim = await cli($, 'summary-claim', id, '', {flags,timeoutMs:timeout(state)})
       if (!claim.work) return
-      const { batch_id, claim_id, system, prompt, model, task = {}, maxTokens = 2048 } = claim.work
+      const { batch_id, claim_id, system, prompt, parts, model, task = {}, maxTokens = 2048 } = claim.work
       state.claim={batch_id,claim_id}
       live(state)
       if(state.leafOnly&&task.level>0)return
@@ -96,9 +106,13 @@ async function writeLoop($, id, state) {
         const checked=await cli($,'summary-check',id,JSON.stringify(state.claim),{timeoutMs:timeout(state)})
         if(!checked.valid)throw Error('Summary settings changed or claim expired')
         live(state)
-        const request=Promise.resolve().then(()=>{
+        const ask=()=>{
           live(state)
-          return $.model.complete({ model: use, system, prompt, maxTokens, timeoutMs: state.deadline?Math.max(1,Math.min(180000,state.deadline-Date.now())):180000 })
+          return $.model.complete({ model: use, system, prompt: hostPrompt(prompt), maxTokens, timeoutMs: state.deadline?Math.max(1,Math.min(180000,state.deadline-Date.now())):180000 })
+        }
+        const request=Promise.resolve().then(ask).catch(error=>{
+          if(plainPrompt||typeof prompt==='string'||!refusedBlocks(error))throw error
+          plainPrompt=true;return ask()
         })
         state.requests.add(request)
         request.then(()=>state.requests.delete(request),()=>state.requests.delete(request))
@@ -110,7 +124,7 @@ async function writeLoop($, id, state) {
         if (!r.isAnswered) throw Error('Summary generation was incomplete')
         return checkedSummary(r.text,{...task,finishReason:r.stopReason ?? r.stop_reason ?? r.finishReason ?? r.finish_reason,maxChars:null})
       }
-      const summary=cached?.summary||await fitSummary(await generate(prompt),draft=>generate(repairSummaryPrompt(draft,task)),{task,onOvershoot:ratio=>{overshoot=ratio}})
+      const summary=cached?.summary||await fitSummary(await generate(parts||prompt),draft=>generate(repairSummaryPromptParts(draft,task)),{task,onOvershoot:ratio=>{overshoot=ratio}})
       if(cached)overshoot=cached.overshoot||1
       live(state)
       outputs.set(id,{key,summary,overshoot,model:use})
@@ -132,12 +146,40 @@ async function writeLoop($, id, state) {
     else if(!state.saving){outputs.delete(id);state.handoff=true;try{await cli($,'summary-host-error',id,JSON.stringify(state.claim||{}))}catch{}}
   }
 }
+// 主模型分支: $.model.fork sends the main thread's own last request (its model, system prompt, tools and
+// messages) with the plan after it, so the whole history is read from the prompt cache, the way Claude Code's
+// own compaction summarizes. A separate `claude --resume` may differ in model, effort or the app's tools, and
+// then reads everything uncached; it remains the fallback. The wait stays inside the claim's lease.
+const FORK_WAIT_MS = 840000
+const forking = new Map()
+async function forkSummaries($, id) {
+  if (forking.has(id) || ended.has(id)) return
+  const state = { claim: null }
+  forking.set(id, state)
+  const settle = reply => cli($, 'fork-settle', id, JSON.stringify({ claim_id: state.claim.claim_id, run_id: state.claim.run_id, ...reply }), { timeoutMs: 120000 })
+  try {
+    const claim = await cli($, 'fork-claim', id)
+    if (!claim.directive) return
+    state.claim = claim
+    let timer
+    const late = new Promise(resolve => { timer = setTimeout(() => resolve({ isAnswered: false, reason: 'timeout' }), FORK_WAIT_MS) })
+    const reply = await Promise.race([Promise.resolve().then(() => $.model.fork({ prompt: claim.directive })), late])
+      .catch(error => { if (error?.name === 'TypeError') forkMissing = true; return { isAnswered: false, reason: forkMissing ? 'unsupported' : 'error' } })
+      .finally(() => clearTimeout(timer))
+    if (!state.claim) return
+    if (!reply.isAnswered) await settle({ reason: reply.reason })
+    else await settle({ text: reply.text, usage: reply.usage, model: await Promise.resolve().then(() => $.session.model()).catch(() => null) })
+    state.claim = null
+  } catch {
+    if (state.claim) try { await settle({ reason: 'error' }) } catch {}
+  } finally { if (forking.get(id) === state) forking.delete(id) }
+}
 function summaryTick($,id) {
   const now=Date.now()
   if(ticking.has(id)||(ticked.has(id)&&now-ticked.get(id)<45000))return
   ticked.set(id,now);ticking.add(id)
   void Promise.resolve().then(()=>$.session.usage()).then(u=>['--tokens',String(u?.context?.tokens||0),'--window',String(u?.context?.window||0)],()=>[])
-    .then(flags=>cli($,'summary-tick',id,'',{flags})).then(reply=>{if(reply.host&&!ended.has(id))return writeSummaries($,id)}).catch(()=>{}).finally(()=>ticking.delete(id))
+    .then(flags=>cli($,'summary-tick',id,'',{flags:forkMissing?flags:[...flags,'--fork']})).then(reply=>{if(ended.has(id))return;if(reply.fork)return forkSummaries($,id);if(reply.host)return writeSummaries($,id)}).catch(()=>{}).finally(()=>ticking.delete(id))
 }
 const toInput = messages => messages.map(m => ({ role: m.role, text: m.text.slice(0, 2000), toolUses:(m.toolUses||[]).map(t=>({tool_use_id:t.tool_use_id||t.id||t.call_id})),toolResultIds:m.toolResultIds||(m.toolResults||[]).map(t=>t.tool_use_id||t.id||t.call_id).filter(Boolean),toolResults: m.toolResults?.length ? 1 : 0, size: m.text.length + JSON.stringify(m.toolUses || []).length + JSON.stringify(m.toolResults || []).length + 200 }))
 async function packet($, id, messages, instructions, trigger, extra = {}) {
@@ -148,7 +190,7 @@ async function packet($, id, messages, instructions, trigger, extra = {}) {
 }
 export function register(on) {
   on('session.start', async ($, e, next) => {
-    try { if (!e.agentId){const id=await $.session.id();ended.delete(id);await cli($, 'summary-host',id)} } catch {}
+    try { if (!e.agentId){const id=await $.session.id();ended.delete(id);await cli($, 'summary-host',id,'',{flags:forkMissing?[]:['--fork']})} } catch {}
     return next(e)
   })
   on('turn.complete', async ($, e, next) => {
@@ -162,10 +204,11 @@ export function register(on) {
   on('session.end', async ($, e, next) => {
     if(e.agentId)return next(e)
     try{
-      const id=await $.session.id(),state=writing.get(id)
+      const id=await $.session.id(),state=writing.get(id),fork=forking.get(id)
       ended.add(id)
       outputs.delete(id);discardClaudeRescue(id)
       ticked.delete(id)
+      if(fork?.claim){const {claim_id,run_id}=fork.claim;fork.claim=null;try{await cli($,'fork-settle',id,JSON.stringify({claim_id,run_id,reason:'session-ended'}))}catch{}}
       if(state){state.handoff=true;state.controller.abort(Error('Session ended'))}
       else await cli($,'summary-handoff',id)
     }catch{}

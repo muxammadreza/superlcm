@@ -4,7 +4,7 @@ import {homedir} from 'node:os'
 import {claudeTranscript} from './store.js'
 import {buildHierarchy,summarySettingsRevision,summaryEstimate,summaryWork} from './summarize.js'
 import {summarizeWith,writerTool,WRITER_CLI} from './cli-writers.js'
-import {scheduleSummary} from './summary-scheduler.js'
+import {scheduleSummary,mainForkDue} from './summary-scheduler.js'
 import {RECENT_CHARS} from './compaction.js'
 
 export function flushUnderPressure(store,id,{tokens=0,window=0}={}) {
@@ -35,7 +35,8 @@ function firstTranscript(id,env) {
  }
  return found.length===1?claudeTranscript(found[0],env):null
 }
-export function summaryTick(store,id,{env=process.env,spawnProcess,tokens=0,window=0}={}) {
+// fork: the calling module can run $.model.fork, which reads the whole history from the main thread's cache.
+export function summaryTick(store,id,{env=process.env,spawnProcess,tokens=0,window=0,fork=false}={}) {
  if(env.SUPERLCM_CLI_WORKER==='1'||!store.integrationEnabled('claude-code')||store.isDeleted(id))return {none:'disabled'}
  const source=store.source(id),file=source?.path||firstTranscript(id,env)
  if(!file||!existsSync(file))return {none:'not recorded yet'}
@@ -45,6 +46,10 @@ export function summaryTick(store,id,{env=process.env,spawnProcess,tokens=0,wind
  const setting=store.effectiveSetting(id,env),{mode,model}=setting
  if(['off','cli','api','main-fork'].includes(mode))store.setSummaryMode(id,mode)
  if(['cli','api'].includes(mode))flushUnderPressure(store,id,{tokens,window})
+ if(mode==='main-fork'&&fork){
+  store.setHostForker(id,true)
+  return mainForkDue(store,id,{env,tokens,window})&&!store.summarizing(id)?{fork:true}:{none:'no eligible work'}
+ }
  if(mode==='main-fork')return {scheduled:scheduleSummary(store,id,mode,null,{env,tokens,window,...(spawnProcess?{spawnProcess}:{})})}
  const work=summaryWork(store,id),revision=summarySettingsRevision(store,id,env)
  if(!work||store.summaryRetry(id,work.batch_id,revision))return {none:'no eligible work'}

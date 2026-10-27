@@ -5,7 +5,7 @@ import { ClaudeStore, claudeTranscript } from './store.js'
 import { codexTranscript, codexSessionKey } from './codex.js'
 import { nativeConversationName } from './conversation-names.js'
 import { buildHierarchy, summaryWork, summarySettingsRevision } from './summarize.js'
-import { SUMMARY_SYSTEM, buildSummaryPrompt, checkedSummary } from './summary-policy.js'
+import { SUMMARY_SYSTEM, buildSummaryPrompt, summaryPromptParts, checkedSummary } from './summary-policy.js'
 import { summarizeWith, writerTool, WRITER_CLI } from './cli-writers.js'
 import { startServer } from './mcp.js'
 import { claudePluginEnabled } from './runtime.js'
@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url'
 import { scheduleSummary, drainSummaryQueue } from './summary-scheduler.js'
 import { enqueueSummaryRun, reserveSummaryRun, bindSummaryRun, progressSummaryRun, finishSummaryRun, activeSummaryRun, summaryConcurrency } from './summary-runs.js'
 import { summaryTick, catchUp, catchupDeadlineMs, pendingLeaves } from './summary-background.js'
+import { claimHostFork, settleHostFork } from './main-fork.js'
 import { randomUUID } from 'node:crypto'
 import {claudeCompactionNodes} from './claude-checkpoints.js'
 import {hostDraft,retainHostDraft,hostSavedReceipt} from './claude-host-drafts.js'
@@ -309,8 +310,26 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
   const store=new ClaudeStore()
   let reply
   const flag=name=>{const at=rest.indexOf(name),n=at<0?0:Number(rest[at+1]);return Number.isSafeInteger(n)&&n>0?n:0}
-  try{reply=summaryTick(store,rest[0],{tokens:flag('--tokens'),window:flag('--window')})}catch{reply={error:'Summary tick failed; originals retained'}}
+  try{reply=summaryTick(store,rest[0],{tokens:flag('--tokens'),window:flag('--window'),fork:rest.includes('--fork')})}catch{reply={error:'Summary tick failed; originals retained'}}
   finally{store.close()}
+  process.stdout.write(JSON.stringify(reply)+'\n')
+} else if (command==='fork-claim'||command==='fork-settle') {
+  // 主模型分支 inside Claude Code (hooks/compact-mod.js): the module answers fork-claim's directive with
+  // $.model.fork and hands the reply to fork-settle. A fork this process cannot run yet goes to `claude --resume`.
+  const store=new ClaudeStore(),session=rest[0]
+  let reply={}
+  try {
+    if(!session||!store.source(session)||store.isDeleted(session))throw Object.assign(Error('conversation not recorded by SuperLcm'),{none:true})
+    if(!store.integrationEnabled('claude-code')||store.metadata(session).harness!=='claude-code')throw Object.assign(Error('Integration is disconnected'),{none:true})
+    if(command==='fork-claim'){
+      if(store.effectiveSetting(session).mode!=='main-fork')throw Object.assign(Error('summaries are not written by a main-thread fork'),{none:true})
+      reply=claimHostFork(store,session)
+    }else{
+      reply=settleHostFork(store,session,await readHook(1000000))
+      if(reply.handoff)scheduleSummary(store,session,'main-fork',null,{handoff:true})
+    }
+  } catch(error) { reply=error.none?{none:error.message}:{error:error.message} }
+  finally { store.close() }
   process.stdout.write(JSON.stringify(reply)+'\n')
 } else if (['summary-host','summary-claim','summary-save','summary-handoff','summary-check','summary-release'].includes(command)) {
   // 本工具后台写 inside Claude Code (hooks/compact-mod.js, 2.1.286+): the module asks for the next piece
@@ -323,12 +342,13 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
   try {
     if(!session)throw new Error('Usage: '+command+' <session>')
     if(!store.integrationEnabled(store.metadata(session).harness))throw Object.assign(Error('Integration is disconnected'),{none:true})
-    if(command==='summary-host')store.setHostWriter(session,true)
+    if(command==='summary-host'){store.setHostWriter(session,true);store.setHostForker(session,rest.includes('--fork'))}
     else if(command==='summary-release'){
       const input=await readHook(),claim=store.db.prepare('SELECT * FROM host_summary_claims WHERE session=?').get(session)
       if(hostClaimMatches(claim,input,summarySettingsRevision(store,session))&&input.batch_id===claim.batch_id){if(claim.run_id)finishSummaryRun(store,claim.run_id,{owner:'host:'+claim.claim_id,state:'stopped',reason:'host-released'});store.releaseHostClaim(session,claim.claim_id)}
     }
     else if(command==='summary-handoff'){
+      store.setHostForker(session,false)
       const input=await readHook().catch(()=>({})),claim=store.db.prepare('SELECT * FROM host_summary_claims WHERE session=?').get(session)
       const active=store.ownsLease(session,'host'),revision=summarySettingsRevision(store,session)
       if(hostClaimMatches(claim,input,revision)||!input.claim_id&&!active){
@@ -370,7 +390,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
           bindSummaryRun(store,queued.run.id,{owner:'host:'+claimId})
           progressSummaryRun(store,queued.run.id,'host:'+claimId,{first:work.first,last:work.last})
           const task=adaptiveSummaryTask(work,readSummaryProfile(profileKey('claude-host',model||'configured',null),store))
-          reply={work:{task:{level:work.level,first:work.first,last:work.last,maxChars:task.maxChars,requestChars:task.requestChars,language:task.language,requireHeading:true},maxTokens:visibleOutputRoom(work.content),batch_id:work.batch_id,claim_id:claimId,revision,system:SUMMARY_SYSTEM,prompt:buildSummaryPrompt(work.content,task),model:model||process.env.SUPERLCM_CLAUDE_CLI_MODEL||'',ready:hostDraft(store,session,work,revision)}}
+          reply={work:{task:{level:work.level,first:work.first,last:work.last,maxChars:task.maxChars,requestChars:task.requestChars,language:task.language,requireHeading:true},maxTokens:visibleOutputRoom(work.content),batch_id:work.batch_id,claim_id:claimId,revision,system:SUMMARY_SYSTEM,prompt:buildSummaryPrompt(work.content,task),parts:summaryPromptParts(work.content,task),model:model||process.env.SUPERLCM_CLAUDE_CLI_MODEL||'',ready:hostDraft(store,session,work,revision)}}
         }
       } else {
         const input=await readHook()

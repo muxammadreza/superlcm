@@ -98,6 +98,7 @@ export class ClaudeStore {
       CREATE TABLE IF NOT EXISTS takeover_settings(id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL, window INTEGER NOT NULL, previous TEXT);
       CREATE TABLE IF NOT EXISTS takeover_copies(session TEXT PRIMARY KEY, remaining INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS host_writers(session TEXT PRIMARY KEY, until_ms INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS host_forkers(session TEXT PRIMARY KEY, until_ms INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS host_summary_claims(session TEXT PRIMARY KEY,batch_id TEXT NOT NULL,revision TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS takeover_runs(session TEXT PRIMARY KEY, at_ms INTEGER NOT NULL, before INTEGER NOT NULL, after INTEGER NOT NULL);
     `)
@@ -242,6 +243,10 @@ export class ClaudeStore {
   // summaries, the Stop hook does not start a separate `claude -p` for it.
   hostWriter(session) { return Boolean(this.db.prepare('SELECT 1 FROM host_writers WHERE session=? AND until_ms>?').get(session,Date.now())) }
   setHostWriter(session,on,duration=6*3600000) { if(on)this.db.prepare('INSERT INTO host_writers(session,until_ms) VALUES(?,?) ON CONFLICT(session) DO UPDATE SET until_ms=excluded.until_ms').run(session,Date.now()+duration); else this.db.prepare('DELETE FROM host_writers WHERE session=?').run(session) }
+  // The same module on a Claude Code with $.model.fork writes main-fork summaries from the session's own cached
+  // request. Each turn renews the mark, so a session without the module falls back to `claude --resume` soon.
+  hostForker(session) { return Boolean(this.db.prepare('SELECT 1 FROM host_forkers WHERE session=? AND until_ms>?').get(session,Date.now())) }
+  setHostForker(session,on,duration=900000) { if(on)this.db.prepare('INSERT INTO host_forkers(session,until_ms) VALUES(?,?) ON CONFLICT(session) DO UPDATE SET until_ms=excluded.until_ms').run(session,Date.now()+duration); else this.db.prepare('DELETE FROM host_forkers WHERE session=?').run(session) }
   takeover() { const r=this.db.prepare('SELECT enabled,window,previous,keep_tokens,compression_ratio FROM takeover_settings WHERE id=1').get(); return r?{enabled:Boolean(r.enabled),window:r.window,keep:r.keep_tokens,previous:r.previous,...(r.compression_ratio!=null?{ratio:r.compression_ratio}:{})}:{...takeoverDefaults,previous:null} }
   setTakeover({enabled,ratio=this.takeover().ratio??null,window=this.takeover().window,keep=this.takeover().keep,previous=this.takeover().previous}) {
     if (typeof enabled!=='boolean' || !Number.isSafeInteger(window) || window<takeoverLimits.window[0] || window>takeoverLimits.window[1] || !Number.isSafeInteger(keep) || keep<takeoverLimits.keep[0] || keep>takeoverLimits.keep[1]) throw new Error('Unsupported compaction takeover setting')
@@ -338,6 +343,7 @@ export class ClaudeStore {
     this.db.prepare('INSERT INTO integrations VALUES(?,?,1) ON CONFLICT(harness) DO UPDATE SET enabled=excluded.enabled,revision=integrations.revision+1').run(harness,enabled?1:0)
     if(!enabled) {
       this.db.prepare('UPDATE host_writers SET until_ms=0 WHERE session IN (SELECT session FROM session_origins WHERE harness=?)').run(harness)
+      this.db.prepare('UPDATE host_forkers SET until_ms=0 WHERE session IN (SELECT session FROM session_origins WHERE harness=?)').run(harness)
       this.db.prepare("UPDATE leases SET until_ms=0 WHERE owner='host' AND session IN (SELECT session FROM session_origins WHERE harness=?)").run(harness)
     }
   }
