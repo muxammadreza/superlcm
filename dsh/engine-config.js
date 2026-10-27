@@ -7,14 +7,16 @@ const DEPRECATED_CONFIG_KEYS = new Set(['cacheTtlSeconds', 'thresholdRatio', 're
 const FALLBACK_CONFIG_KEYS = new Set(['fallbackSummarizationProvider', 'fallbackSummarizationModel'])
 
 const ROLLING_CONFIG_KEYS = new Set([
-  'budgetMode','prepareRatio','switchRatio','emergencyRatio',
+  'forkModelOverride','summaryMode','budgetMode','prepareRatio','switchRatio','emergencyRatio',
   'archiveHome',
+  'databasePath',
   'controlFile',
   'summaryAdapter',
   'runtimeTuning',
   'mode',
   'tailCount',
   'minRetainTokens',
+  'keepRecentTokens',
   'pressureFoldTokens',
   'foldBatchTokens',
   'softActiveTokens',
@@ -72,10 +74,11 @@ function normalizeRolling(config) {
     : softActiveTokens + 1
 
   return {
-    mode,
+    mode, forkModelOverride:raw.forkModelOverride===true, summaryMode: raw.summaryMode === 'main-fork' ? 'main-fork' : 'api',
     budgetMode:raw.budgetMode??(raw.softActiveTokens!==undefined||raw.hardActiveTokens!==undefined?'tokens':'ratio'),
     ...ratioOptions(raw),
     tailCount: positiveInteger(raw.tailCount, ROLLING_DEFAULTS.tailCount),
+    ...(raw.keepRecentTokens===undefined?{}:{keepRecentTokens:raw.keepRecentTokens}),
     minRetainTokens: nonNegativeInteger(raw.minRetainTokens, ROLLING_DEFAULTS.minRetainTokens),
     pressureFoldTokens,
     foldBatchTokens,

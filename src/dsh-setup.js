@@ -42,7 +42,7 @@ export async function dshSetupPreview(store,{env=process.env,runCommand=run,prov
   return {harness:'dsh',scope:'global',revision,provider_ref:choice?.ref||null,provider:choice?.id||null,model:model||null,
     can_apply:!foreign,route_ready:routeReady,mode:'summary-only',blocker:foreign?'检测到冲突的 SuperLcm 插件标识，请先在 dsh harness 中核对':null,
     existing:!!current,files:{settings:file},index_home:store.dir,hook_events_added:[],mcp_action:'global-summary-plugin',requires_review:false,version:packageInfo.version,
-    catalog:publicCatalog(catalog),notes:['全局接入一次，归档原文、后台摘要和查询共用。','压缩由 dsh harness 自身负责，不替换上下文。','后台摘要在接入卡片选择，沿用已保存的自定义 API。'],
+    catalog:publicCatalog(catalog),notes:['全局接入一次，归档原文、后台摘要和查询共用。','压缩由 dsh harness 自身负责，不替换上下文。','内置 DSH 插件随 SuperLcm 自动注册，无需单独安装。','后台摘要默认沿用当前对话模型；已保存的独立 API 设置保留。'],
     _next:{configuration,choice,operations,file,raw,controlsRaw,disabledIds:[...disabledIds],runtimeTuning}}
 }
 export async function applyDshSetup(store,revision,options={}) {

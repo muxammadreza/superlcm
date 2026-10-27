@@ -43,8 +43,9 @@ export function summaryTick(store,id,{env=process.env,spawnProcess,tokens=0,wind
  store.ingest(id,file)
  if(!source)store.setMetadata(id,{harness:'claude-code',externalId:id})
  const setting=store.effectiveSetting(id,env),{mode,model}=setting
- if(['off','cli','api'].includes(mode))store.setSummaryMode(id,mode)
+ if(['off','cli','api','main-fork'].includes(mode))store.setSummaryMode(id,mode)
  if(['cli','api'].includes(mode))flushUnderPressure(store,id,{tokens,window})
+ if(mode==='main-fork')return {scheduled:scheduleSummary(store,id,mode,null,{env,tokens,window,...(spawnProcess?{spawnProcess}:{})})}
  const work=summaryWork(store,id),revision=summarySettingsRevision(store,id,env)
  if(!work||store.summaryRetry(id,work.batch_id,revision))return {none:'no eligible work'}
  if(mode==='cli'&&writerTool('claude-code',env)==='claude-code'){store.setHostWriter(id,true);return {host:true}}

@@ -88,7 +88,7 @@ export async function applyDshArchivePlan(store,plan,{env=process.env,runCommand
     }
     if(disconnect)store.setIntegrationEnabled('dsh',false)
     else enableSummaryOnly(store,'dsh',env)
-    const result={harness:'dsh',scope:'global',version:packageInfo.version,mode:'summary-only',saved:true,configuration_verified:true,disconnected:disconnect,native_compaction:true,restart_required:true,backup,package:stage,serviceRestarted:false}
+    const result={harness:'dsh',scope:'global',version:packageInfo.version,mode:'summary-only',saved:true,configuration_verified:true,disconnected:disconnect,plugin:{name:'superlcm',bundled:true,registered:!disconnect},native_compaction:true,restart_required:true,backup,package:stage,serviceRestarted:false}
     writeFileSync(join(backup,'receipt.json'),JSON.stringify(result,null,2),{mode:0o600});return result
   } catch(error) {
     let conflict=false

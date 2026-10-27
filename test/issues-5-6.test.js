@@ -1,3 +1,4 @@
+import {parseForkTree} from '../src/fork-summary.js'
 import './env.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -82,9 +83,9 @@ test('merge language is anchored to user originals even when children are in Chi
 })
 test('in-conversation submission checks language and headings before storing',async t=>{
  const dir=mkdtempSync(join(tmpdir(),'superlcm-language-')),store=new ClaudeStore(join(dir,'store')),file=join(dir,'source.jsonl');t.after(()=>store.close())
- writeFileSync(file,[{role:'user',content:english.repeat(1800)},{role:'assistant',content:'pending'}].map(JSON.stringify).join('\n')+'\n');store.ingest('s',file);store.setGlobalSetting('agent')
+ writeFileSync(file,[{role:'user',content:english.repeat(1800)},{role:'assistant',content:'pending'}].map(JSON.stringify).join('\n')+'\n');store.ingest('s',file);store.setGlobalSetting('main-fork')
  const work=summaryWork(store,'s');assert.ok(work)
- await assert.rejects(call(store,'lcm_summary_submit',{conversation:'s',batch_id:work.batch_id,summary:'# 状态\n'+chinese.repeat(3)}),/language mismatch/)
+ assert.throws(()=>parseForkTree('# 状态\n'+chinese.repeat(3),[{firstMessage:0,lastMessage:1}],languageInfo('en')),/language mismatch/)
  assert.equal(store.nodeRows('s',0).length,0)
 })
 

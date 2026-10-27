@@ -1,3 +1,6 @@
+import {readControls} from '../dsh/controls-config.js'
+import {controlsPath} from './dsh-controls.js'
+import {saveForkModel} from './fork-model-controls.js'
 import { applyTakeover, claudeCompactWindow } from './takeover.js'
 import { claudePluginEnabled } from './runtime.js'
 import { createServer } from 'node:http'
@@ -30,6 +33,7 @@ import { compressionSnapshot, compressionCapabilities, runtimeVersion } from './
 import { dshCompressionSettings,publicCompressionSettings,saveDshCompression } from './dsh-controls.js'
 import {defaultConsolePort,recordConsoleLocation} from './console-location.js'
 import { refreshConversationNames } from './conversation-names.js'
+import { piCompressionSettings, savePiCompression } from './pi-controls.js'
 export { probeMcp } from './mcp-probe.js'
 
 const nonce = () => randomBytes(18).toString('hex')
@@ -52,9 +56,9 @@ const continueLine = source => `通过 SuperLcm 接续对话 #${source.code}「$
 export async function startWeb({ store = new ClaudeStore(), port = 0, host = '127.0.0.1', env = process.env, nameRefreshMs = 15000, discovery = harnessConnections, catalog = modelCatalog, claudeProbe = probeClaudeConnection, probeModel = o => summarizeWithModel('User: Hello.\nAssistant: Hello! How can I help?', { ...o, timeoutMs: 45000 }), spawnWorker = spawn, terminal = {} } = {}) {
   if (host !== '127.0.0.1') throw new Error('Web console is loopback-only')
   if (!Number.isSafeInteger(port) || port < 0 || port > 65535) throw new Error('Invalid local Web port')
-  const session = url => { const id = url.searchParams.get('session'); if (!id || !store.source(id)) throw new Error('Unknown conversation'); return id }
+  const session = url => { const id = url.searchParams.get('session'); if (!id || !store.source(id)||store.metadata(id).harness==='hermes') throw new Error('Unknown conversation'); return id }
   // One-off catch-up methods this computer can actually run for a conversation.
-  const backends = id => [...(writerTool(store.metadata(id).harness, env) ? ['cli'] : []), ...(store.apiConfig(id, env) ? ['api'] : [])]
+  const backends = id => store.metadata(id).harness==='hermes'?[]:[...(store.effectiveSetting(id,env).mode==='cli'?['cli']:['claude-code','codex'].includes(store.metadata(id).harness)?['main-fork']:[]), ...(store.apiConfig(id, env) ? ['api'] : [])]
   const previews=new Map()
   const bulkSourceRevision=id=>{
     const source=store.source(id),stats=store.stats(id),estimate=summaryEstimate(store,id)
@@ -65,21 +69,21 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
   const queueTimer=setInterval(()=>{try{drain()}catch{}},3000);queueTimer.unref()
   const listView=(view,harness)=>{
     store.recoverSummaryRuns()
-    const listing=store.listSessions(2147483647,0,harness,view)
+    const listing=store.listSessions(2147483647,0,harness,view,true)
     return listing.sessions.filter(row=>view==='headless'||summaryHealth(store,row.session,{env,recover:false,withEstimate:false}).needs_attention)
   }
   const routes = {
     'GET /api/conversations': url => {
       refreshConversationNames(store,{env,minIntervalMs:nameRefreshMs});store.recoverSummaryRuns()
-      const view=url.searchParams.get('view')||'all',listing=store.listSessions(50,int(url.searchParams.get('offset'),0),url.searchParams.get('harness')||undefined,view)
+      const view=url.searchParams.get('view')||'all',listing=store.listSessions(50,int(url.searchParams.get('offset'),0),url.searchParams.get('harness')||undefined,view,true)
       // Listing status is indexed metadata. Work estimates verify every original
       // record and belong to the selected detail/explicit generation preview.
-      return {...listing,sessions:listing.sessions.map(row=>({...row,headless:Boolean(row.headless),summary_health:summaryHealth(store,row.session,{env,recover:false,withEstimate:false})})),groups:store.harnessGroups(),attention_count:store.listSessions(0,0,undefined,'attention').total,headless_count:store.listSessions(0,0,undefined,'headless').total}
+      return {...listing,sessions:listing.sessions.map(row=>({...row,headless:Boolean(row.headless),summary_health:summaryHealth(store,row.session,{env,recover:false,withEstimate:false})})),groups:store.harnessGroups(true),attention_count:store.listSessions(0,0,undefined,'attention',true).total,headless_count:store.listSessions(0,0,undefined,'headless',true).total}
     },
     'GET /api/conversation': url => { const id = session(url);refreshConversationNames(store,{env,session:id,minIntervalMs:nameRefreshMs});const health=summaryHealth(store,id,{env});return { ...store.outline(id), writer_tool: writerTool(store.metadata(id).harness, env), bands: store.bands(id), setting: store.effectiveSetting(id, env), summarizing: health.active||store.summarizing(id),summary_health:health,summary_runs:store.summaryRunHistory(id),status: store.source(id).status, last_compaction: store.lastCompactionDiagnostic(id), reduced_summary_count: store.reducedSummaryCount(id), summary_error_detail: store.source(id).status === 'summary_error' ? store.summaryError(id) : null, backends: backends(id), estimate: health.estimate } },
     'GET /api/outline': url => store.outline(session(url), url.searchParams.get('node') || undefined),
     'GET /api/events': url => { const id = session(url); return { source: store.metadata(id), events: store.eventPreviews(id, int(url.searchParams.get('from'), 0), int(url.searchParams.get('to'), 0)) } },
-    'GET /api/search': url => { refreshConversationNames(store,{env,minIntervalMs:nameRefreshMs});return store.find(url.searchParams.get('q') || '', { harness: url.searchParams.get('harness') || undefined, limit: 30 }) },
+    'GET /api/search': url => { refreshConversationNames(store,{env,minIntervalMs:nameRefreshMs});return store.find(url.searchParams.get('q') || '', { harness: url.searchParams.get('harness') || undefined, limit: 30,excludeRetired:true }) },
     'GET /api/continue': url => { const id = session(url), packet = continuePacket(store, id); return { line: continueLine(packet.source), code: packet.source.code, name: shortName(packet.source.name), packet } },
     'POST /api/rename': async req => { const x = await body(req); if (!store.source(x.session)) throw new Error('Unknown conversation'); return store.nameSession(x.session, x.name) },
     'POST /api/summarize': async req => {
@@ -93,7 +97,7 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
     },
     'POST /api/summarize-bulk-preview': async req => {
       const x=await body(req)
-      if(!['attention','headless'].includes(x.view)||!['cli','api'].includes(x.backend))throw Error('Invalid bulk summary scope')
+      if(!['attention','headless'].includes(x.view)||!['main-fork','cli','api'].includes(x.backend))throw Error('Invalid bulk summary scope')
       if(x.harness!==undefined&&!definitions.some(h=>h.id===x.harness))throw Error('Invalid harness filter')
       if(x.sessions!==undefined&&(!Array.isArray(x.sessions)||x.sessions.length>100||x.sessions.some(id=>typeof id!=='string')||new Set(x.sessions).size!==x.sessions.length))throw Error('Bulk sessions must be a unique list of at most 100 IDs')
       const candidates=listView(x.view,x.harness),allowed=new Set(candidates.map(r=>r.session))
@@ -116,8 +120,10 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
     'GET /api/tuning': () => store.tuning(),
     'POST /api/tuning': async req => store.setTuning(await body(req)),
     'GET /api/connections': () => ({ connections: definitions.map(h => ({ harness: h.id, evidence: connectionEvidence(store, h.id) })) }),
-    'GET /api/harnesses': async () => ({ version:runtimeVersion,features:{dsh_setup:true,dsh_global_setup:true,dsh_compression_controls:true},harnesses: await discovery(store, { env }) }),
+    'GET /api/harnesses': async () => ({ version:runtimeVersion,features:{dsh_setup:true,dsh_global_setup:true,dsh_compression_controls:true},harnesses: (await discovery(store, { env })).filter(x=>x.harness!=='hermes') }),
     'GET /api/compression': () => ({ capabilities: compressionCapabilities, ...compressionSnapshot(store) }),
+    'GET /api/pi-compression': () => piCompressionSettings(store),
+    'POST /api/pi-compression': async req => savePiCompression(store, await body(req)),
     'GET /api/dsh-compression': async()=>publicCompressionSettings(await dshCompressionSettings(store,{env})),
     'POST /api/dsh-compression': async req=>saveDshCompression(store,await body(req),{env}),
     // Claude card: install / update the SuperLcm plugin, or clean up the older MCP + hooks connection.
@@ -125,23 +131,27 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
     'GET /api/local-conversations': url => localConversations(store, url.searchParams.get('harness'), { env, offset: int(url.searchParams.get('offset'), 0) }),
     'POST /api/index-local': async req => { const x = await body(req); return indexLocalConversation(store, x.harness, x.key, { env }) },
     // Opens the tool itself so its own startup screen asks the user to approve new hooks; SuperLcm never approves them.
-    'POST /api/open-review': async req => { const x = await body(req); if (!['codex', 'hermes'].includes(x.harness)) throw new Error('Unsupported tool'); return openInTerminal(findCli(x.harness, env), { dir: store.dir, name: 'open-' + x.harness, cwd: env.HOME, ...terminal }) },
+    'POST /api/open-review': async req => { const x = await body(req); if (x.harness!=='codex') throw new Error('Unsupported tool'); return openInTerminal(findCli(x.harness, env), { dir: store.dir, name: 'open-' + x.harness, cwd: env.HOME, ...terminal }) },
     'POST /api/delete': async req => { const x = await body(req); return store.deleteSession(x.session) },
-    'POST /api/delete-preview': async req => { const x = await body(req); const rows = store.staleSessions(x.before_ms, x.harness || undefined); return { count: rows.length, records: rows.reduce((n, r) => n + r.records, 0), sample: rows.slice(0, 8).map(r => ({ name: r.name || r.session, harness: r.harness, updated_ms: r.updated_ms })) } },
+    'POST /api/delete-preview': async req => { const x = await body(req); const rows = store.staleSessions(x.before_ms, x.harness || undefined).filter(row=>row.harness!=='hermes'); return { count: rows.length, records: rows.reduce((n, r) => n + r.records, 0), sample: rows.slice(0, 8).map(r => ({ name: r.name || r.session, harness: r.harness, updated_ms: r.updated_ms })) } },
     // The client confirms the exact count it previewed, so a conversation that became stale meanwhile is not removed unseen.
-    'POST /api/delete-bulk': async req => { const x = await body(req); const rows = store.staleSessions(x.before_ms, x.harness || undefined); if (rows.length !== x.expect_count) throw new Error('The matching conversations changed; preview again'); for (const r of rows) store.deleteSession(r.session); return { deleted: rows.length } },
+    'POST /api/delete-bulk': async req => { const x = await body(req); const rows = store.staleSessions(x.before_ms, x.harness || undefined).filter(row=>row.harness!=='hermes'); if (rows.length !== x.expect_count) throw new Error('The matching conversations changed; preview again'); for (const r of rows) store.deleteSession(r.session); return { deleted: rows.length } },
     'GET /api/storage': () => store.storageStats(),
     'POST /api/connection-check': async req => { const x = await body(req); return x.harness === 'claude-code' ? claudeProbe(store, { env }) : testHarness(store, x.harness, { env }) },
     'POST /api/setup-preview': async req => { const x = await body(req); return publicPreview(await setupPreview(store, x.harness, { env,provider_ref:x.provider_ref,provider:x.provider,model:x.model })) },
     'POST /api/setup-apply': async req => { const x = await body(req); if (x.confirm !== true) throw Error('请先预览并确认接入'); return applySetup(store, x.harness, x.revision, { env,provider_ref:x.provider_ref,provider:x.provider,model:x.model, approveHooks: x.approve_hooks === true }) },
     'POST /api/disconnect-preview': async req=>{const x=await body(req);return publicPreview(await disconnectPreview(store,x.harness,{env}))},
     'POST /api/disconnect-apply': async req=>{const x=await body(req);if(x.confirm!==true)throw Error('请先预览并确认取消接入');return applyDisconnect(store,x.harness,x.revision,{env})},
+    'POST /api/fork-model': async req=>saveForkModel(store,await body(req),{catalog,env}),
     'GET /api/models': url => catalog(url.searchParams.get('backend'), { env }),
     // Kept fast: no tool detection here, so saving a choice on a card answers at once.
     'GET /api/settings': async () => {
-      const settings = store.harnessSettings()
+      const settings = store.harnessSettings().filter(x=>x.harness!=='hermes')
+      let dshRatio=.8
+      try{dshRatio=readControls(controlsPath(store))?.config.switchRatio??.8}catch{dshRatio=null}
       return {
         global: { ...(store.globalSetting() || { mode: summaryMode(env), model: null, api_provider: null, api_url: null, configured: false }), api_key_configured: store.hasApiCredential('global') },
+        compression_ratios:{dsh:dshRatio},
         index_home: store.dir,
         settings: settings.map(x => ({ ...x, api_key_configured: store.hasApiCredential(store.harnessKeyScope(x.harness, x)) })),
         api_models: store.apiModels().map(m => ({ ...m, key_configured: store.hasApiCredential('model:' + m.id), used_by: settings.filter(x => x.api_ref === m.id).map(x => x.harness) })),
@@ -171,11 +181,13 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
       return { ...saved, key_configured: store.hasApiCredential('model:' + saved.id), tested: x.skip_test !== true }
     },
     // 接管压缩 on/off and its size; turning it on also sets Claude Code's autoCompactWindow (see src/takeover.js).
-    'POST /api/takeover': async req => { const x = await body(req); const r = applyTakeover(store, { enabled: x.enabled === true, window: x.window === undefined ? undefined : Number(x.window), keep: x.keep === undefined ? undefined : Number(x.keep) }, env); return { ...r, previous: undefined, plugin: claudePluginEnabled(env) } },
+    'POST /api/takeover': async req => { const x = await body(req); const r = applyTakeover(store, { enabled: x.enabled === true, ratio: x.ratio, window: x.window === undefined ? undefined : Number(x.window), keep: x.keep === undefined ? undefined : Number(x.keep) }, env); return { ...r, previous: undefined, plugin: claudePluginEnabled(env) } },
     'POST /api/api-models/delete': async req => { const x = await body(req); return { deleted: store.deleteApiModel(x.id) } },
     'POST /api/settings': async req => {
       const x = await body(req)
       if (x.scope !== 'global' && x.scope !== 'harness') throw new Error('Invalid settings scope')
+      if(x.mode==='agent')throw Error('请选择主模型后台分支')
+      if (x.scope==='harness'&&x.harness==='hermes')throw new Error('Unsupported tool')
       if (x.scope === 'harness' && !definitions.some(d => d.id === x.harness) && !store.harnessSetting(x.harness)) throw new Error('Unknown tool')
       if(x.harness==='dsh'&&['cli','agent','codex-cli'].includes(x.mode))throw Error('dsh harness 后台摘要请选择自定义 API')
       if (x.scope === 'harness' && x.mode === 'inherit') return store.clearHarnessSetting(x.harness)

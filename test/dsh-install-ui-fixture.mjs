@@ -16,7 +16,7 @@ for(const profile of ['web','acp']) {
 }
 const web=await startWeb({store,env,catalog:async()=>[],discovery:async()=>{
   const dsh=await inspectDsh(store,{env})
-  return ['hermes','pi'].map(harness=>({harness,bin:process.execPath,supported:true,detected:true,configured:false,compression:compressionCapabilities[harness]})).concat({harness:'dsh',bin:findCli('dsh',env),supported:true,detected:dsh.detected,configured:dsh.configured,configuration_matches:dsh.configuration_matches,dsh,compression:compressionCapabilities.dsh})
+  return ['pi'].map(harness=>({harness,bin:process.execPath,supported:true,detected:true,configured:false,compression:compressionCapabilities[harness]})).concat({harness:'dsh',bin:findCli('dsh',env),supported:true,detected:dsh.detected,configured:dsh.configured,configuration_matches:dsh.configuration_matches,dsh,compression:compressionCapabilities.dsh})
 }})
 console.log(JSON.stringify({url:web.url,dir,archive:store.dir}))
 process.on('SIGTERM',async()=>{await web.close();process.exit(0)})

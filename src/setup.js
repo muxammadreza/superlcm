@@ -3,7 +3,6 @@ import { dirname, join } from 'node:path'
 import { createHash, randomBytes } from 'node:crypto'
 import { configFiles, readJson, mcpRegistration, matchingMcp, ownMcp, script } from './harness.js'
 import { findCli, runCommand as run, commandOptions, preferredNode } from './runtime.js'
-import { readHermesConfig, writeHermesConfig, hermesRuntimeAsync, approveHermesHooks, HERMES_EVENTS } from './hermes-config.js'
 import { codexHookTrust } from './codex-hook-trust.js'
 import { piExtension } from './pi.js'
 import { enableSummaryOnly } from './integration.js'
@@ -18,16 +17,6 @@ export function nativeHooksCurrent(store,harness,env=process.env){
   const word=harness==='codex'?'codex-hook':'hook',command=hookCommandFor(store,word,env)
   try{return Object.values(readJson(configFiles(harness,env).hooks).hooks||{}).flat().flatMap(g=>g?.hooks||[]).filter(h=>oursHook(h?.command,word)).every(h=>h.command===command)}catch{return false}
 }
-// Hermes: MCP server + per-turn shell hooks, written through Hermes' own config code.
-async function hermesPreview(store,env){
-  const files={mcp:configFiles('hermes',env).mcp,hooks:configFiles('hermes',env).mcp},bin=findCli('hermes',env),py=(await hermesRuntimeAsync(env))?.python||null
-  const cfg=py?await readHermesConfig(env):{mcp:null,hooks:{}}
-  const reg={found:!!cfg.mcp,enabled:cfg.mcp?.enabled!==false,config:cfg.mcp},matches=matchingMcp(reg,store,env),conflict=reg.found&&!ownMcp(reg,store)
-  const command=hookCommandFor(store,'hermes-hook',env),added=HERMES_EVENTS.filter(event=>!(cfg.hooks?.[event]||[]).some(h=>h?.command===command))
-  const mcp={command:preferredNode(env).path,args:[script,'mcp'],env:{SUPERLCM_HOME:store.dir,SUPERLCM_CLIENT:'hermes'}}
-  const revision=hash(JSON.stringify({harness:'hermes',raw:read(files.mcp),index:store.dir,script}))
-  return {existing:ownMcp(reg,store),harness:'hermes',revision,can_apply:!!bin&&!!py&&!conflict,blocker:!bin?'未找到 CLI，请先安装对应宿主':!py?'找不到 Hermes 自带的 Python，无法安全修改它的配置':conflict?'同名 superlcm 指向不同命令或索引；不覆盖已有配置，请先核对路径':null,files,index_home:store.dir,hook_events_added:added,hook_command:command,mcp_action:matches?'preserve':'register',requires_review:true,notes:['通过 Hermes 自己的配置代码写入，保留其他设置。','Hermes 要求确认新钩子：可勾选由这里替你允许，否则完成后启动一次 Hermes 确认。'],_next:{mcp:matches?null:mcp,hooks:Object.fromEntries(added.map(event=>[event,{command,timeout:15}])),script}}
-}
 // Pi: one auto-discovered extension file (tools + per-turn capture); no MCP support in Pi itself.
 function piPreview(store,env){
   const file=join(configFiles('pi',env).hooks,'superlcm.ts'),files={mcp:file,hooks:file},bin=findCli('pi',env)
@@ -37,7 +26,6 @@ function piPreview(store,env){
 }
 export async function setupPreview(store,harness,{env=process.env,runCommand=run,...dshOptions}={}) {
   if(harness==='dsh')return (await import('./dsh-setup.js')).dshSetupPreview(store,{env,runCommand,...dshOptions})
-  if(harness==='hermes')return hermesPreview(store,env)
   if(harness==='pi')return piPreview(store,env)
   if(!['codex','claude-code'].includes(harness))throw Error('此 harness 暂未实现自动接入；不会写入猜测的配置')
   const files=configFiles(harness,env),bin=findCli(harness==='codex'?'codex':'claude',env)
@@ -78,11 +66,10 @@ export async function applySetup(store,harness,revision,options={}) {
     const backups=[]
     const backupDir=join(store.dir,'config-backups');mkdirSync(backupDir,{recursive:true,mode:0o700})
     for(const file of new Set([p.files.mcp,p.files.hooks]))if(existsSync(file)){const name=harness+'-'+hash(file).slice(0,10)+'-'+Date.now()+'-'+randomBytes(3).toString('hex')+'.bak';const path=join(backupDir,name);writeFileSync(path,readFileSync(file),{flag:'wx',mode:0o600});backups.push({file,backup:path})}
-    if(harness==='hermes'||harness==='pi'){
-      if(harness==='hermes'&&(p._next.mcp||p.hook_events_added.length))await writeHermesConfig(options.env||process.env,p._next)
+    if(harness==='pi'){
       if(harness==='pi'&&p.mcp_action==='register'){mkdirSync(dirname(p.files.mcp),{recursive:true});const temp=p.files.mcp+'.superlcm-'+randomBytes(6).toString('hex');writeFileSync(temp,p._next.content,{flag:'wx',mode:0o644});renameSync(temp,p.files.mcp)}
       const after=await setupPreview(store,harness,options),verified=after.mcp_action==='preserve'&&!after.hook_events_added.length
-      const trust=harness==='hermes'&&verified&&options.approveHooks?await approve(()=>approveHermesHooks(options.env||process.env,p.hook_command).then(()=>true)):{}
+      const trust={}
       if(verified)enableSummaryOnly(store,harness,options.env)
       return {saved:true,configuration_verified:verified,state:verified?'awaiting_client_reload':'configuration_unverified',harness,backups,hook_events_added:p.hook_events_added,mcp_action:p.mcp_action,requires_review:p.requires_review&&!trust.granted,trust_granted:!!trust.granted,...(trust.error?{trust_error:trust.error}:{})}
     }

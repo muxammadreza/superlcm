@@ -1,0 +1,206 @@
+// Real installed-Pi tool loop: background at 70%, prepared replacement at 80%.
+// Default uses a gated local summary endpoint; --live-luna uses saved Luna.
+import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, realpathSync, existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, dirname } from 'node:path'
+import { pathToFileURL, fileURLToPath } from 'node:url'
+import { ClaudeStore } from '../src/store.js'
+import { piExtension } from '../src/pi.js'
+import { savePiPolicy } from '../src/pi-compaction-policy.js'
+import { readApiKey, saveApiKey } from '../src/api-credentials.js'
+import { findCli } from '../src/runtime.js'
+const mainFork = process.argv.includes('--main-fork')
+const otherModel=process.argv.includes('--other-model'), ratio50=process.argv.includes('--ratio50')
+assert.ok(!(otherModel||ratio50)||mainFork,'native model/ratio fixtures require --main-fork')
+const passive = process.argv.includes('--passive-only')
+const live = process.argv.includes('--live-luna'), dir = mkdtempSync(join(tmpdir(), 'superlcm-pi-background-'))
+const slow = process.argv.includes('--slow-luna'), fail = process.argv.includes('--fail-luna'), cold = process.argv.includes('--cold-input')
+const huge = process.argv.includes('--huge-tool-output'), largeInput = process.argv.includes('--oversized-input')
+const nativePayload = process.argv.includes('--oversized-native-payload'), nativeOutput = process.argv.includes('--oversized-native-output')
+const malformed = process.argv.includes('--malformed-summary'), missing = process.argv.includes('--missing-summary-node'), truncated = process.argv.includes('--truncated-summary')
+const badSummary = malformed || missing || truncated, nativeFault = nativePayload || nativeOutput
+assert.ok(!live || !(slow || fail || cold || huge || largeInput || nativeFault || badSummary), 'fault injection uses only the local endpoint')
+assert.ok(!(nativeFault || badSummary) || mainFork, 'native fork faults require --main-fork')
+assert.ok(!passive || mainFork && !live && !slow && !fail && !nativeFault && !badSummary, 'passive fixture uses the local native branch')
+const agentDir = join(dir, 'agent'), cwd = join(dir, 'work'), sessions = join(agentDir, 'sessions')
+for (const path of [agentDir, cwd, sessions, join(agentDir, 'extensions')]) mkdirSync(path, { recursive: true })
+process.env.PI_CODING_AGENT_DIR = agentDir
+let packageRoot = dirname(realpathSync(findCli('pi')))
+while (!existsSync(join(packageRoot, 'package.json'))) {
+  const parent=dirname(packageRoot); if(parent===packageRoot)throw Error('Cannot locate installed Pi SDK package')
+  packageRoot=parent
+}
+const sdk = await import(pathToFileURL(join(packageRoot, 'dist/index.js')).href)
+const aiRoot = join(packageRoot, 'node_modules/@earendil-works/pi-ai/dist')
+const { createAssistantMessageEventStream } = await import(pathToFileURL(join(aiRoot, 'utils/event-stream.js')).href)
+const { fauxAssistantMessage, fauxToolCall } = await import(pathToFileURL(join(aiRoot, 'providers/faux.js')).href)
+const archive = new ClaudeStore(join(dir, 'archive'))
+let server, mainServer, apiCalls = 0, session, mainCalls = 0, readyApiCalls, swapApiCalls, swapEntry, abortedNativeCalls = 0, transportCalls = 0
+const mainPayloads = [], branchPayloads = []
+let mainStartedResolve
+const mainStarted = new Promise(resolve => { mainStartedResolve = resolve })
+try {
+  let model
+  mainServer = createServer(async (req, res) => {
+    transportCalls++
+    if (!mainFork) { res.writeHead(500); res.end('unexpected main HTTP request'); return }
+    let raw=''; for await (const data of req) raw+=data
+    const body=JSON.parse(raw), last=body.messages.at(-1)?.content
+    const directive=typeof last==='string'?last:JSON.stringify(last)
+    const branch=directive?.includes('Return one JSON object without fences')
+    let content, tool=false, tokens
+    if(branch){
+      apiCalls++;branchPayloads.push(body)
+      if(fail){res.writeHead(503);res.end('synthetic branch failure');return}
+      if(slow)await new Promise(resolve=>setTimeout(resolve,400))
+      const plan=JSON.parse(directive.split('\n').find(line=>line.startsWith('[{"index":')))
+      if(missing)plan.pop()
+      content=JSON.stringify({blocks:plan.map(part=>({index:part.index,summary:'# 当前状态\n检查尚未结束。部署必须另行获得用户明确授权。原始路径和证据请回查。'}))});tokens=500
+      if(malformed)content='invalid JSON from synthetic summary provider'
+    }else{
+      mainPayloads.push(body);mainCalls++;mainStartedResolve();tool=mainCalls< (slow?2:3)
+      if(mainCalls=== (slow?2:3)){if(!passive)assert.ok(swapEntry);assert.ok(raw.includes('LATE_USER_REQUEST_KEEP_VERBATIM'));assert.ok(raw.includes('LATE_TOOL_RESULT_KEEP_VERBATIM'))}
+      tokens=mainCalls===1?(slow||fail||badSummary?95000:(ratio50?49000:79000)):tool?(ratio50?51000:81000):1100
+      content=tool?null:'合成测试正常结束。'
+    }
+    const delta=tool?{role:'assistant',tool_calls:[{index:0,id:'call-'+mainCalls,type:'function',function:{name:'background_checkpoint',arguments:'{}'}}]}:{role:'assistant',content}
+    res.writeHead(200,{'content-type':'text/event-stream'})
+    for(const chunk of [{choices:[{index:0,delta,finish_reason:null}]},{choices:[{index:0,delta:{},finish_reason:branch&&truncated?'length':tool?'tool_calls':'stop'}],usage:{prompt_tokens:tokens-100,completion_tokens:100,total_tokens:tokens,prompt_tokens_details:{cached_tokens:branch?256:0}}}])res.write('data: '+JSON.stringify(chunk)+'\n\n')
+    res.end('data: [DONE]\n\n')
+  })
+  await new Promise(resolve => mainServer.listen(0, '127.0.0.1', resolve))
+  if (live) {
+    const origin = new ClaudeStore()
+    try {
+      const saved = origin.apiModel(origin.harnessSetting('pi')?.api_ref || origin.harnessSetting('dsh')?.api_ref)
+      assert.equal(saved?.model, 'gpt-6-luna')
+      const { id, ...fields } = saved; model = archive.saveApiModel(fields)
+      const key = readApiKey(origin.dir, 'model:' + id, saved.url)
+      if (key) saveApiKey(archive.dir, 'model:' + model.id, key, model.url)
+    } finally { origin.close() }
+  } else {
+    server = createServer(async (req, res) => {
+      let body = ''; for await (const chunk of req) body += chunk
+      assert.equal(JSON.parse(body).model, 'fixture-luna'); apiCalls++
+      assert.ok(body.includes('部署必须另行获得用户明确授权'))
+      if (!cold) await mainStarted // Main model can begin while summary generation is unfinished.
+      if (slow) await new Promise(resolve => setTimeout(resolve, 400))
+      if (fail || cold) { res.writeHead(503); res.end('synthetic Luna failure'); return }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: '# 当前任务\n检查合成项目，保留原文。部署必须另行获得用户明确授权。工作仍在检查阶段。\n\n## 需要回查\n具体路径和工具结果请读取原始记录。' } }] }))
+    })
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    model = archive.saveApiModel({ provider: 'openai', model: 'fixture-luna', url: `http://127.0.0.1:${server.address().port}/v1`, effort: 'high' })
+  }
+  archive.setHarnessSetting('pi', 'api', null, null, null, model.id); archive.setIntegrationEnabled('pi', true)
+  savePiPolicy(archive, { enabled: !passive, ratio: ratio50?.5:.8, ...(mainFork?{summaryMode:'main-fork'}:{}) })
+  writeFileSync(join(agentDir, 'extensions/superlcm.ts'), piExtension({ node: process.execPath, script: fileURLToPath(new URL('../src/cli.js', import.meta.url)), home: archive.dir }))
+  if(nativeFault)writeFileSync(join(agentDir,'extensions/00-native-fault.ts'), `export default function(pi){pi.on('before_provider_request',event=>({...event.payload,${nativePayload?"tools:[{type:'function',function:{name:'oversized_tool',description:'中'.repeat(120000),parameters:{type:'object',properties:{}}}}]":"max_tokens:90000"}}))}`)
+  const manager = sdk.SessionManager.create(cwd, sessions)
+  const usage = tokens => ({ input: tokens - 100, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: tokens, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } })
+  for (let i = 0; i < 8; i++) {
+    manager.appendMessage({ role: 'user', content: `请检查第 ${i} 处。部署必须另行获得用户明确授权。` + '保留准确路径和失败原因。'.repeat(40), timestamp: Date.now() })
+    manager.appendMessage({ role: 'assistant', content: [{ type: 'text', text: `第 ${i} 处尚未结束。` + '路径为 /tmp/synthetic-project，工具结果回查原文。'.repeat(12) }], api: 'openai-completions', provider: 'fixture-main', model: 'scripted-main', usage: usage(cold ? 95000 : ratio50?40000:70000), stopReason: 'stop', timestamp: Date.now() })
+  }
+  const original = readFileSync(manager.getSessionFile(), 'utf8')
+  const settingsManager = sdk.SettingsManager.inMemory({ compaction: { enabled: true, reserveTokens: 1, keepRecentTokens: 512 }, enableAnalytics: false, enableInstallTelemetry: false })
+  const loader = new sdk.DefaultResourceLoader({ cwd, agentDir, settingsManager, noSkills: true, noContextFiles: true, noPromptTemplates: true, noThemes: true })
+  await loader.reload(); assert.deepEqual(loader.getExtensions().errors, [])
+  const modelsFile=join(agentDir,'models.json')
+  if(mainFork){
+    writeFileSync(modelsFile,JSON.stringify({providers:{'fixture-main':{baseUrl:`http://127.0.0.1:${mainServer.address().port}/v1`,api:'openai-completions',apiKey:'synthetic-no-credential',models:[...(otherModel?[{id:'scripted-summary',name:'Scripted summary',reasoning:false,input:['text'],contextWindow:100000,maxTokens:1024,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]:[]),{id:'scripted-main',name:'Scripted main',reasoning:false,input:['text'],contextWindow:100000,maxTokens:1024,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]}}}))
+  }
+  if(otherModel)archive.setHarnessSetting('pi','main-fork','fixture-main/scripted-summary')
+  const modelRuntime = await sdk.ModelRuntime.create({ authPath: join(agentDir, 'auth.json'), modelsPath: mainFork?modelsFile:null, refreshOnCreate: false })
+  // Isolated scripted provider: no real credential or chat endpoint is used.
+  const hasAuth = modelRuntime.hasConfiguredAuth.bind(modelRuntime)
+  modelRuntime.hasConfiguredAuth = provider => provider === 'fixture-main' || hasAuth(provider)
+  const key = 'pi-' + manager.getSessionId()
+  const checkpoint = { name: 'background_checkpoint', label: 'fixture checkpoint', description: 'Deterministic test barrier', parameters: { type: 'object', properties: {} }, async execute() {
+    if (mainCalls === 1 && !slow && !fail && !badSummary) {
+      const deadline = Date.now() + (mainFork?20000:240000)
+      while (Date.now() < deadline) {
+        if (archive.db.prepare("SELECT 1 FROM sqlite_master WHERE name='pi_prepared_compactions'").get() && archive.db.prepare('SELECT 1 FROM pi_prepared_compactions WHERE session=?').get(key)) break
+        await new Promise(resolve => setTimeout(resolve, 50))
+      }
+      assert.ok(archive.db.prepare('SELECT 1 FROM pi_prepared_compactions WHERE session=?').get(key), 'background draft must complete while the main tool call is alive')
+      readyApiCalls = apiCalls
+    }
+    return { content: [{ type: 'text', text: 'LATE_TOOL_RESULT_KEEP_VERBATIM' + (huge ? '巨'.repeat(120000) : '') }], details: {} }
+  } }
+  const result = await sdk.createAgentSession({ cwd, agentDir, settingsManager, resourceLoader: loader, sessionManager: manager, modelRuntime, customTools: [checkpoint],
+    model: { id: 'scripted-main', name: 'Scripted test model', api: 'openai-completions', provider: 'fixture-main', baseUrl: `http://127.0.0.1:${mainServer.address().port}/v1`, reasoning: false, input: ['text'], contextWindow: 100000, maxTokens: 1024, cost: usage(1000).cost } })
+  session = result.session
+  const nativeStream = session.agent.streamFunction
+  if(!mainFork) session.agent.streamFunction = (_model, context, options) => {
+    // Use the real provider for an aborted request: verify that it never reaches
+    // its configured local HTTP endpoint, instead of making a fake honor abort.
+    if (options.signal?.aborted) { abortedNativeCalls++; return nativeStream(_model, context, { ...options, apiKey: 'synthetic-no-credential' }) }
+    mainCalls++; mainStartedResolve()
+    assert.ok(!cold, 'cold input at capacity must never reach the main provider')
+    assert.ok(!largeInput, 'oversized input must never reach the main provider')
+    assert.ok(!fail || mainCalls === 1, 'failed Luna at capacity must stop before the next main provider request')
+    assert.ok(!huge || mainCalls === 1, 'unshrinkable tool result must stop before the next main provider request')
+    if (mainCalls === 1 && !live) assert.equal(swapEntry, undefined)
+    const finalCall = slow ? 2 : 3
+    if (mainCalls === finalCall) {
+      assert.ok(swapEntry, '80% turn boundary must already have installed the prepared summary')
+      const text = JSON.stringify(context.messages)
+      assert.ok(text.includes('SuperLcm')); assert.ok(text.includes('LATE_USER_REQUEST_KEEP_VERBATIM')); assert.ok(text.includes('LATE_TOOL_RESULT_KEEP_VERBATIM'))
+    }
+    assert.ok(mainCalls <= finalCall, 'tool chain must continue naturally, without extra injected turns')
+    const message = fauxAssistantMessage(mainCalls < finalCall ? [fauxToolCall('background_checkpoint', {}, { id: 'call-' + mainCalls })] : '合成测试正常结束。', { stopReason: mainCalls < finalCall ? 'toolUse' : 'stop' })
+    Object.assign(message, { usage: usage(mainCalls === 1 ? (slow || fail ? 95000 : (ratio50?49000:79000)) : mainCalls === finalCall ? 1100 : (ratio50?51000:81000)), provider: 'fixture-main', model: 'scripted-main' })
+    const stream = createAssistantMessageEventStream()
+    queueMicrotask(() => { stream.push({ type: 'start', partial: message }); stream.push({ type: 'done', reason: message.stopReason, message }); stream.end(message) })
+    return stream
+  }
+  session.subscribe(event => { if (event.type === 'entry_appended' && event.entry.type === 'compaction') { swapEntry = event.entry; swapApiCalls = apiCalls } })
+  await session.bindExtensions({onError:error=>console.error('Fixture extension error:',error.message),uiContext:{notify:text=>console.error('Fixture notice:',text),setStatus:()=>{}}})
+  assert.ok(session.getActiveToolNames().includes('lcm_read'))
+  await session.prompt('LATE_USER_REQUEST_KEEP_VERBATIM：继续检查，禁止部署。' + (largeInput ? '中'.repeat(120000) : ''))
+  if(passive){
+    assert.equal(swapEntry,undefined);assert.equal(apiCalls,1);assert.equal(mainCalls,3)
+    const receipt=archive.db.prepare('SELECT * FROM fork_summary_receipts WHERE session=?').get(key)
+    assert.ok(receipt);assert.ok(archive.db.prepare('SELECT COUNT(*) AS n FROM nodes WHERE session=?').get(key).n>0)
+    assert.ok(readFileSync(manager.getSessionFile(),'utf8').startsWith(original))
+    const result={ok:true,mode:'passive-only',installedPi:JSON.parse(readFileSync(join(packageRoot,'package.json'))).version,summaryCalls:apiCalls,mainCalls,contextReplacements:0,fullOriginalPreserved:true,directory:dir}
+    writeFileSync(join(dir,'receipt.json'),JSON.stringify(result,null,2)+'\n');console.log(JSON.stringify(result))
+  } else if (fail || cold || huge || largeInput || nativeFault || badSummary) {
+    assert.equal(swapEntry, undefined); assert.equal(mainCalls, cold || largeInput || nativeFault ? 0 : 1)
+    assert.equal(transportCalls, mainFork ? mainCalls + apiCalls : 0, 'unsafe extra main request must never send HTTP')
+    if (!mainFork && (fail || huge)) assert.ok(abortedNativeCalls >= 1, 'exercise the real installed native provider with the aborted signal')
+    const raw = readFileSync(manager.getSessionFile(), 'utf8')
+    assert.ok(raw.startsWith(original)); assert.ok(raw.includes('LATE_USER_REQUEST_KEEP_VERBATIM'))
+    if (cold || largeInput) assert.ok(raw.includes('superlcm-deferred-input'))
+    else if(!nativeFault) assert.ok(raw.includes('LATE_TOOL_RESULT_KEEP_VERBATIM'))
+    const receipt = { ok: true, mode: nativePayload?'oversized-native-payload':nativeOutput?'oversized-native-output':malformed?'malformed-summary':missing?'missing-summary-node':truncated?'truncated-summary':largeInput ? 'oversized-input' : huge ? 'unshrinkable-tool-result' : cold ? 'cold-input-failure' : 'tool-boundary-failure', directory: dir, mainCalls, abortedNativeCalls, unsafeProviderRequests: mainFork ? transportCalls-mainCalls-apiCalls : transportCalls, fullOriginalPreserved: true }
+    writeFileSync(join(dir, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n'); console.log(JSON.stringify(receipt))
+  } else {
+  if(mainFork){
+    assert.equal(branchPayloads.length,1);assert.equal(apiCalls,1)
+    const branch=branchPayloads[0], main=mainPayloads[0]
+    assert.deepEqual(branch.messages.slice(0,-1),main.messages)
+    assert.deepEqual({...branch,messages:[],model:undefined},{...main,messages:[],model:undefined})
+    assert.equal(branch.model,otherModel?'scripted-summary':'scripted-main');assert.equal(main.model,'scripted-main')
+    assert.equal(swapEntry.details.providerUsage.cacheRead,256)
+  }
+  assert.ok(swapEntry); assert.equal(swapEntry.details.backgroundPrepared, true); assert.equal(swapEntry.details.model, mainFork?(otherModel?'scripted-summary':'scripted-main'):model.model)
+  assert.equal(swapEntry.details.replacementModelCalls, 0); assert.equal(swapEntry.fromExtension ?? swapEntry.fromHook, true)
+  if (!live && !slow) assert.equal(swapApiCalls - readyApiCalls, 0, 'replacement must not call the summary API')
+  assert.equal(mainCalls, slow ? 2 : 3); assert.ok(readFileSync(manager.getSessionFile(), 'utf8').startsWith(original))
+  assert.ok(archive.eventRows(key).map(row => archive.exact(key, row.ordinal)).join('').startsWith(original))
+  const receipt = { ok: true, directory: dir, installedPi: JSON.parse(readFileSync(join(packageRoot, 'package.json'))).version, backgroundAt: ratio50?'40%':'70%', replacedAt: ratio50?'50%':'80%', mainContinuedDuringPreparation: true,
+    mode: mainFork?'native-main-fork':slow ? 'slow-summary-capacity-wait' : 'normal', uninterruptedMainTurns: mainCalls, summaryModel: mainFork?(otherModel?'scripted-summary':'scripted-main'):model.model, replacementSummaryHttpRequests: live || slow ? 'lookup-only path' : swapApiCalls - readyApiCalls,
+    nativeBoundaryCommit: true, appendedUserAndToolResultsPreserved: true, fullOriginalPreserved: true }
+  writeFileSync(join(dir, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n'); console.log(JSON.stringify(receipt))
+  }
+} finally {
+  if (session) { await session.extensionRunner?.emit?.({ type: 'session_shutdown' }); session.dispose() }
+  mainStartedResolve()
+  if (server) await new Promise(resolve => server.close(resolve))
+  if (mainServer) await new Promise(resolve => mainServer.close(resolve))
+  archive.close()
+}

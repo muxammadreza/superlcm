@@ -15,7 +15,10 @@ export function linkUi(profile,stage,backup) {
   const existed=existsSync(file)
   if(existed){
     const metadata=JSON.parse(readFileSync(join(file,'package.json'),'utf8'))
-    const legacy=metadata.name==='SuperLcm'&&metadata.repository?.url==='git+https://github.com/ygc3817922006-sketch/SuperLcm-Lossless-Context.git'
+    const legacy=metadata.name==='SuperLcm'&&[
+      'git+https://github.com/ygc3817922006-sketch/SuperLcm-Lossless-Context.git',
+      'git+https://github.com/yu381792/dsh-superlcm.git'
+    ].includes(metadata.repository?.url)
     if(metadata.superlcmBridge!==true&&!legacy)throw Error('已有同名 superlcm 包，未覆盖')
     renameSync(file,saved)
   }

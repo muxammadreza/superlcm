@@ -1,11 +1,12 @@
+import {cappedRecentKeep} from '../src/recent-retention.js'
 // Ratios describe the current routed request's INPUT capacity, after its
 // output reservation. Fixed prompt/tool costs still count as active input.
 export const RATIO_DEFAULTS = Object.freeze({prepareRatio:0.7,switchRatio:0.8,emergencyRatio:0.9})
 // One user-facing replacement threshold; the other phases are internal.
 export function automaticRatios(switchRatio) {
-  if(!Number.isFinite(switchRatio)||switchRatio<.01||switchRatio>.99)throw Error('压缩比例必须在 1% 到 99% 之间')
+  if(!Number.isFinite(switchRatio)||switchRatio<.11||switchRatio>.99)throw Error('压缩比例必须在 11% 到 99% 之间')
   const round=value=>Math.round(value*1e12)/1e12
-  return {prepareRatio:round(switchRatio-Math.min(.1,switchRatio/2)),switchRatio,
+  return {prepareRatio:round(switchRatio-.1),switchRatio,
     emergencyRatio:round(switchRatio+Math.min(.1,(1-switchRatio)/2))}
 }
 export function ratioOptions(raw = {}) {
@@ -18,7 +19,7 @@ export function ratioOptions(raw = {}) {
   if (!(out.prepareRatio < out.switchRatio && out.switchRatio < out.emergencyRatio)) throw Error('压缩比例必须按准备、替换、紧急顺序递增')
   return out
 }
-export function deriveRatioPolicy(base, {contextWindow,reservedCompletionTokens=0,fixedTokens=0,signature,headerFingerprint} = {}) {
+export function deriveRatioPolicy(base, {contextWindow,reservedCompletionTokens=0,fixedTokens=0,activeTokens,signature,headerFingerprint} = {}) {
   if (!Number.isSafeInteger(contextWindow) || contextWindow <= 0 || !Number.isSafeInteger(reservedCompletionTokens) || reservedCompletionTokens < 0) throw Error('当前聊天模型缺少有效上下文容量或输出预算')
   if (!Number.isSafeInteger(fixedTokens) || fixedTokens < 0 || !Number.isSafeInteger(base.foldBatchTokens) || base.foldBatchTokens < 1) throw Error('摘要粒度和固定上下文预算无效')
   const inputBudget = contextWindow - reservedCompletionTokens
@@ -27,7 +28,7 @@ export function deriveRatioPolicy(base, {contextWindow,reservedCompletionTokens=
   const prepareActiveTokens = Math.floor(inputBudget * ratios.prepareRatio)
   const softActiveTokens = Math.floor(inputBudget * ratios.switchRatio)
   const hardActiveTokens = Math.floor(inputBudget * ratios.emergencyRatio)
-  const minRetainTokens = Math.min(Math.floor(inputBudget * 0.2), Math.floor(softActiveTokens * 0.15), Math.max(2048, Math.min(65536, Math.floor(inputBudget * 0.04))))
+  const minRetainTokens = base.keepRecentTokens === undefined ? Math.min(Math.floor(inputBudget * 0.2), Math.floor(softActiveTokens * 0.15), Math.max(2048, Math.min(65536, Math.floor(inputBudget * 0.04)))) : cappedRecentKeep(base.keepRecentTokens, Math.max(0,Math.min(softActiveTokens,activeTokens??softActiveTokens)-fixedTokens))
   // Fixed prompts/tools cannot be compressed. Add them to the normal summary
   // and recent-original budgets instead of squeezing the summary into the
   // last 1K of an otherwise impossible 10% post-compaction target.

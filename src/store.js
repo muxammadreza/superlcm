@@ -1,3 +1,4 @@
+import { migrateSummaryModes } from './summary-migration.js'
 import { initializeEventCounts } from './event-counts.js'
 import { codexHeadlessRecord, codexHeadlessStatus } from './codex.js'
 import { initializeSummaryRuns, latestSummaryRun, summaryRunHistory, recoverSummaryRuns } from './summary-runs.js'
@@ -103,10 +104,13 @@ export class ClaudeStore {
     initializeEventCounts(this.db)
     initializeSummaryRuns(this.db)
     const hostColumns=new Set(this.db.prepare('PRAGMA table_info(host_summary_claims)').all().map(c=>c.name))
+    // Retire old registrations without deleting their archives or settings.
+    this.db.prepare("INSERT INTO integrations(harness,enabled,revision) VALUES('hermes',0,1) ON CONFLICT(harness) DO UPDATE SET enabled=0,revision=integrations.revision+1 WHERE integrations.enabled<>0").run()
     for(const [column,type] of [['claim_id',"TEXT NOT NULL DEFAULT ''"],['leaf_only','INTEGER NOT NULL DEFAULT 0'],['deadline_ms','INTEGER NOT NULL DEFAULT 0'],['run_id','TEXT']])if(!hostColumns.has(column))this.db.exec(`ALTER TABLE host_summary_claims ADD COLUMN ${column} ${type}`)
     const deliveryColumns=new Set(this.db.prepare('PRAGMA table_info(deliveries)').all().map(c=>c.name))
     if(!new Set(this.db.prepare('PRAGMA table_info(leases)').all().map(c=>c.name)).has('owner'))this.db.exec("ALTER TABLE leases ADD COLUMN owner TEXT NOT NULL DEFAULT ''")
     if(!new Set(this.db.prepare('PRAGMA table_info(takeover_settings)').all().map(c=>c.name)).has('keep_tokens'))this.db.exec('ALTER TABLE takeover_settings ADD COLUMN keep_tokens INTEGER NOT NULL DEFAULT 40000')
+    if(!new Set(this.db.prepare('PRAGMA table_info(takeover_settings)').all().map(c=>c.name)).has('compression_ratio'))this.db.exec('ALTER TABLE takeover_settings ADD COLUMN compression_ratio REAL')
     if(!deliveryColumns.has('issued_via'))this.db.exec('ALTER TABLE deliveries ADD COLUMN issued_via TEXT')
     if(!deliveryColumns.has('delivery_route'))this.db.exec("ALTER TABLE deliveries ADD COLUMN delivery_route TEXT NOT NULL DEFAULT 'hook'")
     // Existing alpha.5 indexes have only (session,harness); preserve every row.
@@ -146,6 +150,7 @@ export class ClaudeStore {
       for(const x of this.harnessSettings())if(owner[x.mode])this.db.prepare("UPDATE harness_summary_settings SET mode='cli',model=? WHERE harness=?").run(owner[x.mode]===x.harness?x.model:null,x.harness)
       this.db.exec('PRAGMA user_version=1');this.db.exec('COMMIT')
     }
+    migrateSummaryModes(this.db)
     this.backfillHeadless()
   }
   close() { this.db.close() }
@@ -201,21 +206,21 @@ export class ClaudeStore {
     if (status === 'ok' && this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='summary_errors'").get()) this.db.prepare("UPDATE summary_errors SET detail='' WHERE session=?").run(session)
   }
   setSummaryMode(session,mode) {
-    if (!['off','cli','api'].includes(mode) || !this.source(session)) throw new Error('Invalid session summary mode')
+    if (!['off','cli','api','main-fork'].includes(mode) || !this.source(session)) throw new Error('Invalid session summary mode')
     this.db.prepare('INSERT INTO summary_policies(session,mode) VALUES(?,?) ON CONFLICT(session) DO UPDATE SET mode=excluded.mode').run(session,mode)
   }
   summaryMode(session) { return this.db.prepare('SELECT mode FROM summary_policies WHERE session=?').get(session)?.mode || null }
   setPreference(session,mode,model=null) {
-    if (!this.source(session) || !['auto','off','cli','codex-cli','api','agent'].includes(mode) || (model!==null && (typeof model!=='string' || !validModel(model)))) throw new Error('Invalid summary preference')
+    if (!this.source(session) || !['auto','off','cli','codex-cli','api','main-fork'].includes(mode) || (model!==null && (typeof model!=='string' || !validModel(model)))) throw new Error('Invalid summary preference')
     this.db.prepare('INSERT INTO summary_preferences(session,mode,model) VALUES(?,?,?) ON CONFLICT(session) DO UPDATE SET mode=excluded.mode,model=excluded.model').run(session,mode,model)
     return this.preference(session)
   }
   preference(session) {return this.db.prepare('SELECT mode,model FROM summary_preferences WHERE session=?').get(session)||{mode:'auto',model:null}}
   // Legacy conversation preferences remain in SQLite for migration; routing ignores them.
-  validateSetting(mode,model,apiProvider=null,apiURL=null) {
-    if (!['off','cli','api','agent'].includes(mode) || (model!==null && (typeof model!=='string' || !(mode==='api'?validApiModel(model):validModel(model))))) throw new Error('Invalid summary setting or model ID')
+  validateSetting(mode,model,apiProvider=null,apiURL=null,{allowForkModel=false}={}) {
+    if (!['off','cli','api','main-fork'].includes(mode) || (model!==null && (typeof model!=='string' || !(mode==='api'?validApiModel(model):validModel(model))))) throw new Error('Invalid summary setting or model ID')
     if(mode==='api') {if(!model)throw new Error('Custom API requires an explicit model ID');return {api_provider:apiProvider,api_url:normalizeApiEndpoint(apiProvider,apiURL)}}
-    if (['off','agent'].includes(mode) && model!==null) throw new Error('This summary mode does not use a model')
+    if ((mode==='off'||mode==='main-fork'&&!allowForkModel) && model!==null) throw new Error('This summary mode does not use a model')
     return {api_provider:null,api_url:null}
   }
   // Granularity applies to batches planned from now on; saved nodes keep their original ranges.
@@ -237,10 +242,11 @@ export class ClaudeStore {
   // summaries, the Stop hook does not start a separate `claude -p` for it.
   hostWriter(session) { return Boolean(this.db.prepare('SELECT 1 FROM host_writers WHERE session=? AND until_ms>?').get(session,Date.now())) }
   setHostWriter(session,on,duration=6*3600000) { if(on)this.db.prepare('INSERT INTO host_writers(session,until_ms) VALUES(?,?) ON CONFLICT(session) DO UPDATE SET until_ms=excluded.until_ms').run(session,Date.now()+duration); else this.db.prepare('DELETE FROM host_writers WHERE session=?').run(session) }
-  takeover() { const r=this.db.prepare('SELECT enabled,window,previous,keep_tokens FROM takeover_settings WHERE id=1').get(); return r?{enabled:Boolean(r.enabled),window:r.window,keep:r.keep_tokens,previous:r.previous}:{...takeoverDefaults,previous:null} }
-  setTakeover({enabled,window=this.takeover().window,keep=this.takeover().keep,previous=this.takeover().previous}) {
+  takeover() { const r=this.db.prepare('SELECT enabled,window,previous,keep_tokens,compression_ratio FROM takeover_settings WHERE id=1').get(); return r?{enabled:Boolean(r.enabled),window:r.window,keep:r.keep_tokens,previous:r.previous,...(r.compression_ratio!=null?{ratio:r.compression_ratio}:{})}:{...takeoverDefaults,previous:null} }
+  setTakeover({enabled,ratio=this.takeover().ratio??null,window=this.takeover().window,keep=this.takeover().keep,previous=this.takeover().previous}) {
     if (typeof enabled!=='boolean' || !Number.isSafeInteger(window) || window<takeoverLimits.window[0] || window>takeoverLimits.window[1] || !Number.isSafeInteger(keep) || keep<takeoverLimits.keep[0] || keep>takeoverLimits.keep[1]) throw new Error('Unsupported compaction takeover setting')
-    this.db.prepare('INSERT INTO takeover_settings(id,enabled,window,previous,keep_tokens) VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,window=excluded.window,previous=excluded.previous,keep_tokens=excluded.keep_tokens').run(enabled?1:0,window,previous,keep)
+    if(ratio!==null&&(!Number.isFinite(ratio)||ratio<.11||ratio>.99))throw Error('压缩比例必须在 11% 到 99% 之间')
+    this.db.prepare('INSERT INTO takeover_settings(id,enabled,window,previous,keep_tokens,compression_ratio) VALUES(1,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,window=excluded.window,previous=excluded.previous,keep_tokens=excluded.keep_tokens,compression_ratio=excluded.compression_ratio').run(enabled?1:0,window,previous,keep,ratio)
     return this.takeover()
   }
   // The newest packet SuperLcm handed Claude Code for a conversation, so the SessionStart hook after the
@@ -303,8 +309,9 @@ export class ClaudeStore {
   }
   deleteApiModel(id) {
     if(!this.apiModel(id))throw new Error('Unknown API model')
-    const users=this.db.prepare('SELECT harness FROM harness_summary_settings WHERE api_ref=?').all(id).map(x=>x.harness)
+    const users=this.db.prepare("SELECT harness FROM harness_summary_settings WHERE api_ref=? AND harness<>'hermes'").all(id).map(x=>x.harness)
     if(users.length)throw new Error('Still used by '+users.join(', ')+'; pick another method for it first')
+    this.db.prepare("UPDATE harness_summary_settings SET api_ref=NULL WHERE harness='hermes' AND api_ref=?").run(id)
     this.db.prepare('DELETE FROM api_models WHERE id=?').run(id);removeApiKey(this.dir,'model:'+id)
     return true
   }
@@ -314,9 +321,10 @@ export class ClaudeStore {
     return this.globalSetting()
   }
   setHarnessSetting(harness,mode,model=null,apiProvider=null,apiURL=null,apiRef=null) {
+    if(harness==='hermes')throw Error('Unsupported harness')
     this.harnessSetting(harness)
     if(apiRef!==null){const m=this.apiModel(apiRef);if(mode!=='api'||!m)throw new Error('Unknown API model');[model,apiProvider,apiURL]=[m.model,m.provider,m.url]}
-    const api=this.validateSetting(mode,model,apiProvider,apiURL)
+    const api=this.validateSetting(mode,model,apiProvider,apiURL,{allowForkModel:['pi','claude-code'].includes(harness)})
     this.db.prepare('INSERT INTO harness_summary_settings(harness,mode,model,api_provider,api_url,api_ref) VALUES(?,?,?,?,?,?) ON CONFLICT(harness) DO UPDATE SET mode=excluded.mode,model=excluded.model,api_provider=excluded.api_provider,api_url=excluded.api_url,api_ref=excluded.api_ref').run(harness,mode,model,api.api_provider,api.api_url,apiRef)
     return this.harnessSetting(harness)
   }
@@ -324,8 +332,9 @@ export class ClaudeStore {
   harnessKeyScope(harness,setting=this.harnessSetting(harness)) {return setting?.api_ref?'model:'+setting.api_ref:'harness:'+harness}
   clearHarnessSetting(harness) {this.harnessSetting(harness);this.db.prepare('DELETE FROM harness_summary_settings WHERE harness=?').run(harness);return null}
   harnessSettings() {return this.db.prepare(ClaudeStore.SETTING+' ORDER BY h.harness').all()}
-  integrationEnabled(harness) { return this.db.prepare('SELECT enabled FROM integrations WHERE harness=?').get(harness)?.enabled !== 0 }
+  integrationEnabled(harness) { return harness!=='hermes' && this.db.prepare('SELECT enabled FROM integrations WHERE harness=?').get(harness)?.enabled !== 0 }
   setIntegrationEnabled(harness, enabled) {
+    if(harness==='hermes'&&enabled)throw Error('Unsupported harness')
     this.db.prepare('INSERT INTO integrations VALUES(?,?,1) ON CONFLICT(harness) DO UPDATE SET enabled=excluded.enabled,revision=integrations.revision+1').run(harness,enabled?1:0)
     if(!enabled) {
       this.db.prepare('UPDATE host_writers SET until_ms=0 WHERE session IN (SELECT session FROM session_origins WHERE harness=?)').run(harness)
@@ -342,9 +351,10 @@ export class ClaudeStore {
     const choice=specific||this.globalSetting()
     const r=choice ? {...choice,scope:specific?'harness':'global',harness} : {mode:summaryMode(env),model:null,api_provider:null,api_url:null,scope:'environment',harness}
     // A model belongs to one tool's CLI, so only a tool's own setting (or the environment) names one.
+    if(r.mode==='agent')r.mode='main-fork'
     if(r.mode==='codex-cli')r.mode='cli'
     if(r.mode==='cli'&&r.scope==='global')r.model=null
-    if(harness==='dsh'&&!['api','off'].includes(r.mode))return {...r,mode:'off',model:null,scope:'needs-api'}
+    if(harness==='dsh'&&!['api','off','main-fork'].includes(r.mode))return {...r,mode:'off',model:null,scope:'needs-api'}
     return r
   }
   apiCredential(session,env=process.env) {
@@ -358,6 +368,7 @@ export class ClaudeStore {
   apiConfig(session,env=process.env) {
     if(!this.source(session))throw new Error('Unknown session')
     const harness=this.db.prepare('SELECT harness FROM session_origins WHERE session=?').get(session)?.harness||'legacy'
+    if(harness==='hermes')return null
     const own=harness!=='legacy'?this.harnessSetting(harness):null
     for (const [scope,choice] of [[this.harnessKeyScope(harness,own),own],['global',this.globalSetting()]]) {
       if (choice?.mode!=='api') continue
@@ -409,11 +420,11 @@ export class ClaudeStore {
     return {session,headless:Boolean(row?.headless),...(legacyDshSource(this.db,session)?{historical_archive:legacyDshSource(this.db,session)}:{}),code:shortCode(session),harness:row?.harness||'legacy',conversation_id:row?.external_id||session,name:row?.display_name||derivedName(first)||session,name_source:row?.name_source||(first?'derived':'id')}
   }
   sources() { return this.listSessions(2147483647,0).sessions }
-  listSessions(limit=20,offset=0,harness,view='all') {
+  listSessions(limit=20,offset=0,harness,view='all',excludeRetired=false) {
     this.backfillHeadless()
     if(!['all','attention','headless'].includes(view))throw Error('Invalid conversation view')
     const scope=view==='headless'?"COALESCE(o.headless,0)=1":view==='attention'?"COALESCE(o.headless,0)=0 AND s.status IN ('summary_error','summary_unconfigured') AND NOT EXISTS(SELECT 1 FROM summary_runs r WHERE r.session=s.session AND r.state IN ('queued','starting','running'))":null
-    const clauses=[...(harness?["COALESCE(o.harness,'legacy')=?"]:[]),...(scope?[scope]:[])]
+    const clauses=[...(excludeRetired?["COALESCE(o.harness,'legacy')<>'hermes'"]:[]),...(harness?["COALESCE(o.harness,'legacy')=?"]:[]),...(scope?[scope]:[])]
     const where=clauses.length?' WHERE '+clauses.join(' AND '):''
     const params=harness ? [harness] : []
     const total=this.db.prepare('SELECT COUNT(*) AS n FROM sources s LEFT JOIN session_origins o ON s.session=o.session'+where).get(...params).n
@@ -496,7 +507,7 @@ export class ClaudeStore {
     const firstLevel=this.db.prepare('SELECT harness FROM session_origins WHERE session=?').get(session)?.harness==='dsh'?0:1
     return this.db.prepare('SELECT n.id,n.level,n.first,n.last,n.children FROM nodes n WHERE n.session=? AND n.level>=? AND '+dshVisibleNodes(this.db)+' ORDER BY n.level DESC,n.first').all(session,firstLevel).map(node=>dshNodeSources(this.db,session,{...node,children:JSON.parse(node.children)}))
   }
-  harnessGroups() { return this.db.prepare("SELECT COALESCE(o.harness,'legacy') AS harness,COUNT(*) AS n FROM sources s LEFT JOIN session_origins o ON o.session=s.session GROUP BY 1 ORDER BY 2 DESC").all() }
+  harnessGroups(excludeRetired=false) { return this.db.prepare("SELECT COALESCE(o.harness,'legacy') AS harness,COUNT(*) AS n FROM sources s LEFT JOIN session_origins o ON o.session=s.session"+(excludeRetired?" WHERE COALESCE(o.harness,'legacy')<>'hermes'":'')+" GROUP BY 1 ORDER BY 2 DESC").all() }
   summarizing(session) { return Boolean(this.db.prepare('SELECT 1 FROM leases WHERE session=? AND until_ms>?').get(session,Date.now())) }
   // Most recent visible messages, oldest first, within a character budget.
   recent(session, maxChars=6000) {
@@ -510,17 +521,17 @@ export class ClaudeStore {
     return out
   }
   // Substring search (works for CJK) across one or all conversations.
-  find(query, {session, harness, limit=20}={}) {
+  find(query, {session, harness, limit=20,excludeRetired=false}={}) {
     const cap=bounded(limit,20,50)
     if (query===undefined || query==='') {
-      const list=this.listSessions(cap,0,harness)
+      const list=this.listSessions(cap,0,harness,'all',excludeRetired)
       return {conversations:list.sessions.map(({session,code,harness,name,records,summary_count,updated_ms})=>({session,code,harness,name,records,summary_count,updated_ms})),total:list.total}
     }
     if (typeof query!=='string' || query.length>200) throw new Error('Query must be 1–200 characters')
     const like='%'+query.trim().replace(/[\\%_]/g,m=>'\\'+m)+'%'
-    const scope=session?' AND x.session=?':harness?" AND x.session IN (SELECT session FROM session_origins WHERE harness=?)":''
+    const scope=(session?' AND x.session=?':harness?" AND x.session IN (SELECT session FROM session_origins WHERE harness=?)":'')+(excludeRetired?" AND x.session NOT IN (SELECT session FROM session_origins WHERE harness='hermes')":'')
     const args=session?[session]:harness?[harness]:[]
-    const conversations=session?[]:this.resolve(query).filter(m=>!harness||m.harness===harness).slice(0,10)
+    const conversations=session?[]:this.resolve(query).filter(m=>(!harness||m.harness===harness)&&(!excludeRetired||m.harness!=='hermes')).slice(0,10)
     const summaries=this.db.prepare(`SELECT x.session,x.id,x.level,x.first,x.last,x.summary FROM nodes x WHERE x.summary LIKE ? ESCAPE '\\' AND ${dshVisibleNodes(this.db,'x')}${scope} ORDER BY x.level DESC,x.first DESC LIMIT ?`).all(like,...args,cap).map(r=>({...r,conversation:this.metadata(r.session)}))
     const events=this.db.prepare(`SELECT x.session,x.ordinal,x.preview FROM events x WHERE x.preview LIKE ? ESCAPE '\\'${scope} ORDER BY x.rowid DESC LIMIT ?`).all(like,...args,cap).map(r=>{const i=r.preview.toLowerCase().indexOf(query.trim().toLowerCase());return {session:r.session,ordinal:r.ordinal,snippet:r.preview.slice(Math.max(0,i-120),i+240),conversation:this.metadata(r.session)}})
     return {query,conversations,summaries,events}
@@ -538,27 +549,36 @@ export class ClaudeStore {
     const file = realpathSync(path)
     if (!statSync(file).isFile()) throw new Error('Source is not a regular file')
     const prior = this.source(session)
-    // Claude Code moves a conversation's transcript when its folder changes (a desktop scratch workspace opened
-    // on a project, a worktree). Follow the file only when it starts with exactly the bytes already indexed.
-    if (prior && prior.kind === kind && prior.path !== file && this.#continues(session, prior.offset, file)) this.db.prepare('UPDATE sources SET path=? WHERE session=?').run(file, session)
-    else if (prior && (prior.path !== file || prior.kind !== kind)) throw new Error('Session already bound to a different source; use a distinct session id')
+    if (prior && (prior.path !== file || prior.kind !== kind)) {
+      if (prior.kind !== kind || !this.#continuesSource(session,prior.offset,file)) throw new Error('Session already bound to a different source; use a distinct session id')
+      this.db.prepare('UPDATE sources SET path=? WHERE session=?').run(file,session)
+    }
     this.db.prepare('INSERT OR IGNORE INTO sources(session,path,kind) VALUES(?,?,?)').run(session, file, kind)
     return file
   }
-  // True when `file` begins with SuperLcm's private copy of this conversation, byte for byte.
-  #continues(session, offset, file) {
+  // Hosts may move a transcript between workspaces. Only follow a move when
+  // every indexed byte still agrees with both the private archive and its digest.
+  // This runs once per path change, under the ingest transaction, never per append.
+  #continuesSource(session,offset,file) {
     if (offset === 0) return !this.db.prepare('SELECT 1 FROM events WHERE session=? LIMIT 1').get(session)
-    const archive = this.archivePath(session)
-    if (!existsSync(archive) || statSync(archive).size < offset || statSync(file).size < offset) return false
-    const a = openSync(archive, 'r'), b = openSync(file, 'r'), x = Buffer.alloc(1024 * 1024), y = Buffer.alloc(1024 * 1024)
+    const archive=this.archivePath(session)
+    if (!existsSync(archive)) return false
+    const archived=openSync(archive,'r')
     try {
-      for (let at = 0; at < offset;) {
-        const n = Math.min(x.length, offset - at)
-        if (readSync(a, x, 0, n, at) !== n || readSync(b, y, 0, n, at) !== n || !x.subarray(0, n).equals(y.subarray(0, n))) return false
-        at += n
-      }
-      return true
-    } finally { closeSync(a); closeSync(b) }
+      const source=openSync(file,'r')
+      try {
+        const archiveSize=fstatSync(archived).size,sourceSize=fstatSync(source).size
+        if (archiveSize < offset || sourceSize < offset) return false
+        let through=0
+        for (const row of this.db.prepare('SELECT start,end,digest FROM events WHERE session=? ORDER BY ordinal').iterate(session)) {
+          if (row.start !== through || row.end > offset) return false
+          const a=this.#readRange(archived,row.start,row.end,archiveSize),b=this.#readRange(source,row.start,row.end,sourceSize)
+          if (!a || !b || a.digest !== row.digest || !a.raw.equals(b.raw)) return false
+          through=row.end
+        }
+        return through === offset
+      } finally { closeSync(source) }
+    } finally { closeSync(archived) }
   }
   ingest(session, path, kind = 'jsonl') {
     // Serialize the cursor snapshot, archive copy and indexing across processes.
@@ -626,6 +646,8 @@ export class ClaudeStore {
     try {
       const deliveries = this.db.prepare('SELECT id FROM deliveries WHERE source_session=? OR target_session=?').all(session, session).map(x => x.id)
       for (const id of deliveries) { this.db.prepare('DELETE FROM delivery_packets WHERE id=?').run(id); this.db.prepare('DELETE FROM deliveries WHERE id=?').run(id) }
+      if(this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='pi_compaction_chunks'").get())this.db.prepare('DELETE FROM pi_compaction_chunks WHERE session=?').run(session)
+      if(this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='pi_prepared_compactions'").get())this.db.prepare('DELETE FROM pi_prepared_compactions WHERE session=?').run(session)
       for (const table of ['event_fts', 'events', 'session_event_counts', 'node_fts', 'nodes', 'leases', 'summary_retries', 'summary_flush', 'compactions', 'takeover_copies', 'host_writers', 'summary_policies', 'summary_preferences', 'session_origins', 'sources']) this.db.prepare(`DELETE FROM ${table} WHERE session=?`).run(session)
       this.db.prepare('INSERT INTO deleted_sessions(session,deleted_ms) VALUES(?,?) ON CONFLICT(session) DO UPDATE SET deleted_ms=excluded.deleted_ms').run(session, Date.now())
       this.db.exec('COMMIT')

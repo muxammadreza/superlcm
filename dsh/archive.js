@@ -1,3 +1,4 @@
+import {MainArchiveFork} from './main-archive-fork.js'
 import { createMcpToolDefinition } from '@deepseek-ai/dsh-mcp-client'
 import { extractSessionEventText } from '@deepseek-ai/dsh-session-query'
 import { home } from '../src/store.js'
@@ -13,7 +14,7 @@ import { join, resolve } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 
 export const name = 'superlcm-archive'
-export const inject = ['tools','sessionQuery','sessions']
+export const inject = ['tools','sessionQuery','sessions','llm','tokenMeter']
 export const Config = z.object({archiveHome:z.string().default('')})
 
 export function projectEvent(id, event) {
@@ -30,6 +31,7 @@ export function apply(ctx,config={}) {
   if (migrated.added) ctx.logger?.info?.(`SuperLcm 已迁入 ${migrated.added} 条旧 DSH 摘要`)
   for (const conflict of migrated.conflicts) ctx.logger?.warn?.(`SuperLcm 旧摘要迁入冲突：${conflict.sessionId}/${conflict.nodeId}（${conflict.fields.join(', ')}）；共享索引与旧档案均保留，未覆盖`)
   const warn = error => ctx.logger?.warn?.('SuperLcm 归档：' + (error?.message || error))
+  const forks=new MainArchiveFork(ctx,native,archiveHome,warn)
   const dirty = new Set(), cursors = new Map(), observed = new Set(), settled=new Set()
   let stopped = false, running = null
   reporter.report('', 'starting')
@@ -104,7 +106,9 @@ export function apply(ctx,config={}) {
         batch.push(record); bytes += size
       }
       if(!await flush())return // Also sync a title or committed summary when there are no new events.
-      if(settled.delete(id))await worker.request({method:'summarize',session:dshSessionKey(id)})
+      const ended=settled.delete(id)
+      if(ended)await worker.request({method:'summarize',session:dshSessionKey(id)})
+      forks.afterCapture(id,ended)
       reporter.report(id, 'synced', { end: from - 1 })
     } finally { await observation.close() }
   }
@@ -144,5 +148,5 @@ export function apply(ctx,config={}) {
       },
     }))
   }
-  ctx.effect(() => async () => { stopped = true; reporter.close(); await running; await worker.close(); native.close() })
+  ctx.effect(() => async () => { stopped = true; reporter.close(); await running; await worker.close(); await forks.close(); native.close() })
 }

@@ -5,7 +5,7 @@ import { readOpenAICompletion, readSummaryJson, readSummaryText, summaryFailure,
 import { createHash, randomUUID } from 'node:crypto'
 import { detectSummaryLanguage, userTextFromRecord, excerptUserTexts } from './summary-language.js'
 import { summaryEvents, recentUserTexts } from './summary-source.js'
-import { isRequestCopy } from './claude-records.js'
+import {isRequestCopy} from './claude-records.js'
 import {selectSummaryMerge,mergeContent} from './summary-merge.js'
 import { nodeId } from './store.js'
 import { normalizeApiEndpoint, loopbackEndpoint, EFFORTS } from './api-endpoint.js'
@@ -119,9 +119,9 @@ function segmentEnd(events, from, budget, batchSize) {
   let size = 0, count = 0
   const pending=new Set()
   for (let i = from; i < events.length; i++) {
-    if (!visibleEvent(events[i])) continue
     const pairing=events[i].toolPairing||{opened:[],closed:[]}
-    if(pairing.endsTurn)pending.clear() // calls left open by an interrupted turn are never answered
+    if(pairing.endsTurn)pending.clear()
+    if (!visibleEvent(events[i])) continue
     const len = budget.tokens?estimateSummaryTokens(eventPrefix(events[i])+events[i].summaryText+'\n'):textLength(events[i])
     if (count && !pending.size && size + len > budget.target) return i - 1
     size += len; count++
@@ -132,14 +132,14 @@ function segmentEnd(events, from, budget, batchSize) {
   return -1
 }
 // A pressure-flushed open segment may end only after every opened tool has
-// returned. Unfinished tools and all records after the frozen mark stay raw.
+// returned or a verified new turn abandoned them. Records after the frozen mark stay raw.
 function flushEnd(events,from,through) {
   let end=-1
   const pending=new Set()
   for(let i=from;i<events.length&&events[i].ordinal<=through;i++){
-    if(!visibleEvent(events[i]))continue
     const pairing=events[i].toolPairing||{opened:[],closed:[]}
     if(pairing.endsTurn)pending.clear()
+    if(!visibleEvent(events[i]))continue
     for(const id of pairing.opened)pending.add(id)
     for(const id of pairing.closed)pending.delete(id)
     if(!pending.size)end=i
@@ -236,7 +236,7 @@ export function summaryEstimate(store, session, options={}) {
 }
 export function summarySettingsRevision(store, session, env = process.env) {
   const setting = store.effectiveSetting(session, env)
-  return hash(JSON.stringify([setting,store.tuning(),store.integrationRevision(setting.harness), setting.mode === 'api' ? store.apiCredential(session, env) : null]))
+  return hash(JSON.stringify([setting,store.tuning(),store.integrationRevision(setting.harness),setting.mode==='main-fork'&&setting.harness==='claude-code'?store.takeover():null, setting.mode === 'api' ? store.apiCredential(session, env) : null]))
 }
 export async function buildHierarchy(store, session, { model, apiKey, baseURL, apiURL, apiProvider, effort = null, batchSize = segmentMessages(), targetChars, targetTokens, fanout = store.tuning().fanout, summarize = summarizeWithModel, fetchImpl, shouldContinue = null, leaseDurationMs = 330000, leaseHeartbeatMs = 30000, retryFailed = false, leafOnly = false, maxPieces = Infinity, signal, runId = null } = {}) {
   if (!model || (apiKey == null && summarize === summarizeWithModel)) throw new Error('Explicit summarizer model and API key required')

@@ -803,7 +803,7 @@ async function actualSend(ctx,agent,text) {
       stopError=ctx.on('agent/error',payload=>{if(payload.agent===agent)errors.push(payload.error)})
       stopStatus=ctx.on('agent/status',payload=>{if(payload.agent===agent&&payload.status==='idle')resolve()})
       timer=setTimeout(()=>reject(Error('local Agent.send fixture did not finish')),5000)
-      agent.send(createUserMessage({content:[{type:'text',text}]}),'next-turn',true)
+      agent.send(createUserMessage({source:{kind:'user'},content:[{type:'text',text}]}),'next-turn',true)
     })
   }finally{stopStatus?.();stopError?.();clearTimeout(timer)}
   return errors

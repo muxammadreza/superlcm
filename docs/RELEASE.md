@@ -13,7 +13,7 @@ superlcm web
 ```
 
 浏览器打开命令输出的本机地址，在「接入」中选择载体。默认接入归档、后台摘要和查询，上下文由各工具自身压缩。dsh harness 用户先按
-[官方说明](https://github.com/deepseek-ai/deepseek-harness) 安装并启动 dsh harness，再完成全局接入并重新加载。后台摘要在接入卡片选择已保存的自定义 API；默认接入不需要压缩模型，也不需要旧的 dsh-superlcm 插件。
+[官方说明](https://github.com/deepseek-ai/deepseek-harness) 安装并启动 dsh harness，再完成全局接入并重新加载。后台摘要在接入卡片选择已保存的自定义 API；默认接入不需要压缩模型。DSH 插件已包含在 SuperLcm 主包，接入时自动注册到 DSH 的插件列表，无需单独安装 `dsh-superlcm`；已识别的旧独立插件会自动迁移，旧文件和数据保留。
 
 控制台导航为「对话 → 接入 → 压缩 → 设置」。独立「压缩」页分开管理 Claude Code 和 DSH 的可选 SuperLcm 接管，默认关闭。DSH「插件 → SuperLcm」仅显示「后台设置」，点击进入后台 DSH 压缩页。需要接管时在该页明确开启并保存，首次开启后重新加载 DSH；原聊天模型与原生压缩政策保留，所选压缩模型的调用额度只在生成压缩摘要时使用。详见 [DSH 接入与压缩](DSH.md)。
 

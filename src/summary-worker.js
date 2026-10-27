@@ -1,3 +1,4 @@
+import {generateMainFork} from './main-fork.js'
 import { buildHierarchy } from './summarize.js'
 import { summarizeWith, writerTool, WRITER_CLI } from './cli-writers.js'
 import { enqueueSummary, summaryQueueRevision } from './summary-scheduler.js'
@@ -26,12 +27,16 @@ export async function runSummaryWorker(store,session,{runId=null,backend=null,en
     const api=backend==='api'?store.apiConfig(session,env):null
     const setting=api?{mode:'api',...api}:backend?{mode:backend,model:run.model}:store.effectiveSetting(session,env)
     if(!backend&&!store.integrationEnabled(store.metadata(session).harness))throw Object.assign(Error('Summary integration cancelled'),{summaryKind:'cancelled'})
-    if(!['api','cli'].includes(setting.mode))throw Object.assign(Error('Summary settings changed; background writing stopped'),{summaryKind:'cancelled'})
+    if(!['api','cli','main-fork'].includes(setting.mode))throw Object.assign(Error('Summary settings changed; background writing stopped'),{summaryKind:'cancelled'})
     const shouldContinue=()=>summaryQueueRevision(store,session,{backend,env})===run.revision
     const controller=new AbortController(),cancel=()=>controller.abort(Object.assign(Error('Summary worker cancelled'),{summaryKind:'cancelled'}))
     process.once('SIGTERM',cancel);process.once('SIGINT',cancel)
     try {
       const options={runId,shouldContinue,signal:controller.signal,retryFailed:run.origin==='manual'||run.origin==='bulk'}
+      if(setting.mode==='main-fork'){
+        const stored=store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='fork_summary_plans'").get()&&store.db.prepare('SELECT plan FROM fork_summary_plans WHERE run_id=?').get(runId)
+        return await generateMainFork(store,session,{...options,env,explicit:!!backend,force:run.origin==='manual'||run.origin==='bulk',queuedPlan:stored?JSON.parse(stored.plan):null})
+      }
       if(setting.mode==='api')return await buildHierarchy(store,session,{...options,model:setting.model||env.SUPERLCM_CLAUDE_MODEL,apiKey:api?api.apiKey:store.apiCredential(session,env),apiProvider:setting.api_provider||'anthropic',apiURL:setting.api_url||env.SUPERLCM_CLAUDE_API_URL,effort:setting.effort||setting.api_effort||null})
       const tool=writerTool(store.metadata(session).harness,env)
       if(!tool)throw Object.assign(Error('No configured summary executable'),{summaryKind:'spawn'})

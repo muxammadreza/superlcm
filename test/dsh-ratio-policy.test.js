@@ -72,6 +72,22 @@ test('legal early thresholds shrink automatic retention and summary budgets too'
 
 test('one compaction threshold arranges preparation and safety automatically',()=>{
   assert.deepEqual(automaticRatios(.8),{prepareRatio:.7,switchRatio:.8,emergencyRatio:.9})
-  for(const ratio of [.01,.7,.85,.9,.99]){const x=automaticRatios(ratio);assert.equal(x.switchRatio,ratio);assert.ok(x.prepareRatio>0&&x.prepareRatio<ratio);assert.ok(x.emergencyRatio>ratio&&x.emergencyRatio<1)}
-  for(const ratio of [0,1,NaN,Infinity,'0.8'])assert.throws(()=>automaticRatios(ratio),/压缩比例/)
+  for(const ratio of [.11,.5,.7,.85,.9,.99]){const x=automaticRatios(ratio);assert.equal(x.switchRatio,ratio);assert.ok(x.prepareRatio>0&&x.prepareRatio<ratio);assert.ok(x.emergencyRatio>ratio&&x.emergencyRatio<1)}
+  for(const ratio of [0,.1,1,NaN,Infinity,'0.8'])assert.throws(()=>automaticRatios(ratio),/压缩比例/)
+})
+
+test('recent-original presets are honored and shrink safely with the routed input budget',()=>{
+ const p=keep=>deriveRatioPolicy({foldBatchTokens:20000,keepRecentTokens:keep},{contextWindow:1000000,reservedCompletionTokens:100000})
+ assert.equal(p(20000).minRetainTokens,20000);assert.equal(p(80000).minRetainTokens,80000)
+ const small=deriveRatioPolicy({foldBatchTokens:20000,keepRecentTokens:200000,...automaticRatios(.5)},{contextWindow:64000,reservedCompletionTokens:16000,fixedTokens:4000})
+ assert.equal(small.minRetainTokens,10000)
+ assert.ok(small.minRetainTokens+small.summaryPrefixTargetTokens+4000<small.softActiveTokens)
+ assert.ok(small.postTargetTokens<small.hardActiveTokens)
+ assert.equal(small.protectLatestUser,true)
+ for(const keep of [null,0,4999,200001,Infinity,5000.5])assert.throws(()=>p(keep),/原文保留/)
+})
+
+test('configured retention uses half the active dialogue rather than half an empty model window',()=>{
+ const p=deriveRatioPolicy({foldBatchTokens:20000,keepRecentTokens:80000},{contextWindow:100000,activeTokens:30000,fixedTokens:4000})
+ assert.equal(p.minRetainTokens,13000)
 })

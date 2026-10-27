@@ -25,8 +25,8 @@ function variant(plugin,id,config) {
   const identity={...config};delete identity.models;delete identity.modelOverrides
   return hash({plugin,id,config:identity}).slice(0,24)
 }
-export async function readDshCatalog(configuration) {
-  const {host,profiles}=configuration,load=name=>import(pathToFileURL(host.require.resolve(name)).href)
+export async function readDshCatalog(configuration,{loadModule}={}) {
+  const {host,profiles}=configuration,load=loadModule||(name=>import(pathToFileURL(host.require.resolve(name)).href))
   const {Context}=await load('@deepseek-ai/cordis'),{default:Llm}=await load('@deepseek-ai/dsh-llm')
   const choices=new Map(),errors=[]
   for(const profile of profiles) {
@@ -46,7 +46,8 @@ export async function readDshCatalog(configuration) {
         for(const provider of configured) {
           let models=[];if(active.some(p=>p.id===provider.id))try{models=await ctx.llm.listModels(provider.id)}catch{errors.push({provider:provider.id,error:'模型目录无法读取'})}
           if(provider.error)errors.push({provider:provider.id,error:'部分模型配置无法读取'})
-          if(entry.name.endsWith('deepseek-account')&&!models.length){const common=await load('@deepseek-ai/dsh-llm-deepseek');models=common.plainOptions(normalized).models.map(m=>common.catalogModelInfo(provider.id,m))}
+          // Account catalogs belong to the host. Recent adapters deliberately
+          // have no configurable models field; an empty listing is legitimate.
           const definition=entry.name.endsWith('dsh-llm-pi-ai')?entry.config.providers[provider.id]:(entry.config||{})
           const ref=variant(entry.name,provider.id,definition)
           if(!choices.has(ref)) choices.set(ref,{ref,id:provider.id,label:provider.name||provider.id,models:[],_plugin:entry.name,_config:definition,_sources:[]})

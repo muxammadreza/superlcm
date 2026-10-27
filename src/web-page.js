@@ -20,7 +20,7 @@ export function page(nonce) {
     <a class="brand" href="#conversations" id="brand" title="返回对话列表">${logo}SuperLcm</a>
     <nav class="nav" aria-label="主菜单">
       <button type="button" data-view="conversations">对话</button>
-      <button type="button" data-view="connect">接入</button>
+      <button type="button" data-view="connect">工具</button>
       <button type="button" data-view="compression">压缩</button>
       <button type="button" data-view="settings">设置</button>
     </nav>
@@ -46,7 +46,7 @@ export function page(nonce) {
 
   <section class="view page" id="view-connect" hidden>
     <div class="page-inner">
-      <div class="page-h"><h1>接入</h1><p>接入后，该工具的对话会自动存入 SuperLcm，其中的 AI 也可查阅全部已存对话。</p></div>
+      <div class="page-h"><h1>工具</h1><p>统一管理归档、后台摘要与可选压缩接管。主模型后台分支默认沿用当前会话的模型和账户，一次生成分块与上层摘要。</p></div>
       <div class="tools" id="tools"></div>
       <p class="page-note">导入：接入之前的旧对话，可以从本机记录中挑选导入。只读取你选中的对话，不会调用模型。</p>
     </div>
@@ -54,32 +54,41 @@ export function page(nonce) {
 
   <section class="view page" id="view-compression" hidden>
     <div class="page-inner compression-inner">
-      <div class="page-h"><h1>压缩</h1><p>分别管理 Claude 和 DSH 的压缩方式。后台摘要在接入页面设置。</p></div>
-      <div class="compression-tabs" role="tablist" aria-label="压缩工具">
-        <button type="button" id="compression-tab-claude" role="tab" data-compression-tool="claude-code" aria-controls="compression-claude-code" aria-selected="true">Claude Code</button>
-        <button type="button" id="compression-tab-dsh" role="tab" data-compression-tool="dsh" aria-controls="compression-dsh" aria-selected="false">dsh harness</button>
+      <div class="page-h"><h1>压缩</h1><p>默认约 70% 在后台准备整棵摘要树；支持接管的工具约 80% 替换已完成摘要，保留后来追加的原文。Codex 使用原生压缩，SuperLcm 仅生成后台摘要。</p></div>
+      <div class="compression-layout">
+      <div class="compression-tabs" role="tablist" aria-label="压缩工具" aria-orientation="horizontal">
+        <button type="button" id="compression-tab-claude" role="tab" data-compression-tool="claude-code" aria-controls="compression-claude-code" aria-selected="true"><span class="hmark" aria-hidden="true">${icons['claude-code']}</span><span>Claude Code</span></button>
+        <button type="button" id="compression-tab-dsh" role="tab" data-compression-tool="dsh" aria-controls="compression-dsh" aria-selected="false"><span class="hmark" aria-hidden="true">${icons['dsh']}</span><span>dsh harness</span></button>
+        <button type="button" id="compression-tab-pi" role="tab" data-compression-tool="pi" aria-controls="compression-pi" aria-selected="false"><span class="hmark" aria-hidden="true">${icons['pi']}</span><span>Pi</span></button>
       </div>
+      <div class="compression-content">
       <section class="compression-card" id="compression-claude-code" data-compression="claude-code" role="tabpanel" aria-labelledby="compression-tab-claude">
         <div class="compression-card-head"><div><span class="eyebrow">Claude Code</span><h2>Claude 压缩</h2></div><span class="state" id="claudeCompressionOwner" hidden>正在读取…</span></div>
         <p class="desc">Claude Code 的对话太长时会压缩。交给 SuperLcm 后，旧的部分换成后台写好的摘要，最近几轮原样留下，原文随时能用 lcm_read 调回。</p>
         <label class="toggle-row"><span><b>由 SuperLcm 接管压缩</b><span>到门槛时直接换上现成的摘要，不调用模型，几乎不用等</span></span><span class="switch"><input type="checkbox" id="takeoverOn" role="switch"><i></i></span></label>
-        <h3>压缩门槛</h3>
-        <p class="desc">上下文到这个大小，SuperLcm 换上摘要；模型窗口放不下时自动调低。</p>
-        <div class="choice" id="takeoverWindow" role="radiogroup" aria-label="压缩门槛"><button type="button" role="radio" data-w="200000">200K</button><button type="button" role="radio" data-w="300000">300K<small>推荐</small></button><button type="button" role="radio" data-w="500000">500K</button><button type="button" role="radio" data-w="800000">800K</button><button type="button" role="radio" data-custom>自定义<small></small></button></div>
-        <div class="custom-size" id="takeoverWindowCustom" hidden><input type="number" inputmode="numeric" min="100" max="950" step="10" aria-label="自定义压缩门槛"><span>K</span><button type="button" class="btn small">保存</button><span class="hint">100K–950K</span></div>
+        <h3>压缩比例</h3>
+        <p class="desc">上下文占用达到所选比例时压缩。按当前模型的可用容量计算，默认 80%。</p>
+        <div class="choice" id="takeoverRatio" role="radiogroup" aria-label="压缩比例"><button type="button" role="radio" data-r="70">70%</button><button type="button" role="radio" data-r="80">80%<small>推荐</small></button><button type="button" role="radio" data-r="90">90%</button><button type="button" role="radio" data-custom>自定义<small></small></button></div>
+        <div class="custom-size" id="takeoverRatioCustom" hidden><input type="number" inputmode="numeric" min="11" max="99" step="1" aria-label="自定义压缩比例（%）"><span>%</span><button type="button" class="btn small">保存</button><span class="hint">11%–99%</span></div>
+        <p class="notice calm" id="claudePreparationHint"></p>
+        <div id="claudeForkModelSettings"></div>
         <h3>最近原文保留</h3>
         <p class="desc">替换时最近这么多内容一字不改地留下，接着干活不丢细节；更早的才换成摘要。最多保留当前上下文的一半。</p>
         <div class="choice" id="takeoverKeep" role="radiogroup" aria-label="最近原文保留"><button type="button" role="radio" data-k="20000">20K</button><button type="button" role="radio" data-k="40000">40K<small>推荐</small></button><button type="button" role="radio" data-k="80000">80K</button><button type="button" role="radio" data-custom>自定义<small></small></button></div>
         <div class="custom-size" id="takeoverKeepCustom" hidden><input type="number" inputmode="numeric" min="5" max="200" step="5" aria-label="自定义最近原文保留"><span>K</span><button type="button" class="btn small">保存</button><span class="hint">5K–200K</span></div>
-        <h3>运行条件</h3>
-        <ul class="checks" id="takeoverChecks"></ul>
-        <details class="how"><summary>它怎么工作</summary><p>SuperLcm 平时就在后台把对话写成分层摘要，但不动 Claude Code 的上下文。到了门槛，Claude Code 要压缩时，SuperLcm 把已经被摘要覆盖的旧对话换成这些摘要，没覆盖到的部分和最近一段（按「最近原文保留」，至少两轮）一字不改地保留。</p><p>摘要还没跟上、对不上号、换完仍然太大，或者是子代理的对话，都照旧交给 Claude Code 自己压缩，对话不会因此卡住。打开时会改 Claude Code 的设置，让它正好在门槛开始压缩，由 SuperLcm 当场换上摘要；它显示的窗口是门槛再加 100K（最多 1M）。关闭时恢复原来的设置。</p></details>
       </section>
       <section class="compression-card" id="compression-dsh" data-compression="dsh" role="tabpanel" aria-labelledby="compression-tab-dsh" hidden>
         <div class="compression-card-head"><div><span class="eyebrow">dsh harness</span><h2>DSH 压缩</h2></div><span class="state" id="dshCompressionOwner" hidden>正在读取…</span></div>
         <p class="desc">可选择由 SuperLcm 接管。关闭接管时，DSH 使用原生压缩，后台摘要和归档继续独立运行。</p>
         <div id="dshCompressionSettings"><p class="muted">正在读取压缩设置…</p></div>
       </section>
+      <section class="compression-card" id="compression-pi" data-compression="pi" role="tabpanel" aria-labelledby="compression-tab-pi" hidden>
+        <div class="compression-card-head"><div><span class="eyebrow">Pi</span><h2>Pi 压缩</h2></div><span class="state" id="piCompressionOwner" hidden></span></div>
+        <p class="desc">提前在后台准备摘要，到门槛直接替换，完整原文随时可查。空间不足时暂停模型请求，保护对话。</p>
+        <div id="piCompressionSettings"><p class="muted">正在读取压缩设置…</p></div>
+      </section>
+      </div>
+      </div>
     </div>
   </section>
 
@@ -113,12 +122,12 @@ export function page(nonce) {
       </div>
       <div class="panel" data-sec="summary" hidden>
         <h2>摘要</h2>
-        <p class="desc">每个工具用哪种方式写摘要，在「接入」页它的卡片上选：「对话模型生成」由正在聊天的 AI 顺手写，几乎不多花钱；「本工具后台写」和「自定义 API」在后台单独调用模型，不占用主对话。摘要仅用于导航，原文始终完整保存。</p>
+        <p class="desc">在「工具」页选择摘要方式。默认由主模型后台分支，一次返回按粒度划分的叶子摘要和上层摘要，插件验证后整树保存。原请求前缀保持不变；实际缓存命中以供应商用量回执为准。原文始终完整保存。</p>
         <h3>自定义 API 模型</h3>
-        <p class="desc">在这里添加模型，之后在「接入」页任意工具的卡片上选「自定义 API」就能挑它来写摘要。改了这里，用它的工具一起生效。密钥只存在这台电脑上。</p>
+        <p class="desc">在这里添加模型，之后在「工具」页任意工具的卡片上选「独立 API（高级）」就能挑它来写摘要。改了这里，用它的工具一起生效。密钥只存在这台电脑上。</p>
         <div id="apiModels"></div>
         <h3>粒度</h3>
-        <p class="desc">只影响之后新生成的摘要，已有摘要保持不变。</p>
+        <p class="desc">所有工具共用这份粒度设置。只影响之后新生成的摘要，已有摘要保持不变。</p>
         <div class="fields">
           <label class="field">第 1 层每段原文<select id="segSize"><option value="10000">约 10,000 token · 更细</option><option value="20000">约 20,000 token · 推荐</option><option value="40000">约 40,000 token · 更省</option></select></label>
           <label class="field">合并方式<select id="fanout"><option value="3">每 3 段合并为上一层</option><option value="4">每 4 段合并为上一层 · 推荐</option><option value="6">每 6 段合并为上一层</option></select></label>
@@ -134,8 +143,6 @@ export function page(nonce) {
           <div><code>lcm_find</code><span>按名称、编号或关键词查找对话，并在摘要与原文中全文搜索。</span></div>
           <div><code>lcm_outline</code><span>逐层展开摘要目录。</span></div>
           <div><code>lcm_read</code><span>按编号读取原文，与原始记录逐字一致。</span></div>
-          <div><code>lcm_summary_task</code><span>领取下一段待写的摘要（仅「对话模型生成」模式可用）。</span></div>
-          <div><code>lcm_summary_submit</code><span>提交摘要，服务器校验原文后保存（同上）。</span></div>
         </div>
       </div>
         </div>
@@ -151,9 +158,11 @@ ${asset('web-i18n.js')}
 ${asset('web-client.js')}
 ${dshRuntimeState.toString()}
 ${dshGlobalState.toString()}
+${asset('web-retention-controls.js')}
 ${asset('web-compression.js')}
 ${asset('web-admin.js')}
 ${asset('web-dsh-controls.js')}
+${asset('web-pi-controls.js')}
 ${asset('web-dsh.js')}
 boot();
 </script>

@@ -1,3 +1,4 @@
+import {mountDshPersistence} from '../src/dsh-persistence.js'
 // Installed DSH persistence, compressed real artifacts; no model or network.
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -12,10 +13,10 @@ import {captureDshPacket,projectDshEvent} from '../src/dsh.js'
 import {call} from '../src/mcp.js'
 import {startWeb} from '../src/web.js'
 const host=dshHost(),load=name=>import(pathToFileURL(host.require.resolve(name)).href)
-const [{Context},{default:Persistence},{extractSessionEventText}]=await Promise.all([load('@deepseek-ai/cordis'),load('@deepseek-ai/dsh-session-persistence-jsonl'),load('@deepseek-ai/dsh-session-query')])
+const [{Context},persistenceModule,{extractSessionEventText}]=await Promise.all([load('@deepseek-ai/cordis'),load('@deepseek-ai/dsh-session-persistence-jsonl'),load('@deepseek-ai/dsh-session-query')])
 for(const compression of ['zstd','none'])test('DSH history import ('+compression+') preserves originals, deduplicates and shares live continuation',async()=>{
   const folder=mkdtempSync(join(tmpdir(),'superlcm-dsh-history-')),root=join(folder,'native/sessions'),env={...process.env,DSH_HOME:join(folder,'native')}
-  const ctx=new Context(),persistence=new Persistence(ctx,{root,compression}),store=new ClaudeStore(join(folder,'archive'))
+  const ctx=new Context(),persistence=await mountDshPersistence(ctx,persistenceModule,{root,compression}),store=new ClaudeStore(join(folder,'archive'))
   let handle,web
   const header={id:'history-main',version:4,createdAt:1,isSeeded:false,delegationDepth:0,cwd:'/fixture'}
   const events=[
@@ -32,7 +33,7 @@ for(const compression of ['zstd','none'])test('DSH history import ('+compression
     const imported=await indexLocalConversation(store,'dsh',selected.key,{env})
     assert.equal(imported.added,2);assert.equal(imported.session,'dsh-history-main');assert.equal(imported.source.name,'压缩历史测试')
     assert.deepEqual(JSON.parse(store.exact(imported.session,0)).event,events[0],'complete original survives short preview')
-    assert.equal(store.effectiveSetting(imported.session).mode,'off')
+    assert.equal(store.effectiveSetting(imported.session).mode,'main-fork');assert.equal(!!store.latestSummaryRun(imported.session),false,'manual import starts no model work')
     assert.equal(store.clients().some(c=>c.client==='dsh'&&c.kind==='hook'),false,'manual import does not claim live capture')
     assert.equal((await indexLocalConversation(store,'dsh',selected.key,{env})).added,0)
     assert.deepEqual(readFileSync(selected.path),before);assert.equal(statSync(selected.path).mtimeMs,beforeStat.mtimeMs,'source stays untouched')

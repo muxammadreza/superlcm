@@ -9,7 +9,6 @@ import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { ClaudeStore } from '../src/store.js'
 import { buildHierarchy } from '../src/summarize.js'
-import { captureHermes } from '../src/hermes.js'
 import { planCompaction, cutIndex } from '../src/compaction.js'
 import { startWeb } from '../src/web.js'
 import { captureDshPacket } from '../src/dsh.js'
@@ -41,32 +40,6 @@ test('ambiguous repeated Claude sequences fall back without dropping an unsummar
   assert.equal(cutIndex(afterEarlierCompaction, events, 5), null, 'a later repeat is not the vanished covered prefix')
   assert.equal(afterPlan.use, false)
   assert.equal(afterPlan.ambiguous, true)
-})
-
-test('Hermes recovers an append before commit once, including the first capture', t => {
-  const { dir, store } = fixture(t), nativeDir = join(dir, 'hermes'); mkdirSync(nativeDir)
-  const native = new DatabaseSync(join(nativeDir, 'state.db')); t.after(() => native.close())
-  native.exec('CREATE TABLE sessions(id TEXT PRIMARY KEY,parent_session_id TEXT,end_reason TEXT,title TEXT,started_at INTEGER); CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,role TEXT,content TEXT)')
-  native.prepare('INSERT INTO sessions VALUES(?,?,?,?,?)').run('a', null, null, 'Synthetic task', 1)
-  const insert = id => native.prepare('INSERT INTO messages VALUES(?,?,?,?)').run(id, 'a', id % 2 ? 'user' : 'assistant', 'Synthetic original ' + id)
-  const env = { HERMES_HOME: nativeDir }, original = store.db
-  const failCommit = () => {
-    let inject = true
-    store.db = new Proxy(original, { get(target, key) {
-      if (key === 'exec') return sql => { if (inject && sql === 'COMMIT') { inject = false; throw Error('injected commit failure') }; return target.exec(sql) }
-      const value = target[key]; return typeof value === 'function' ? value.bind(target) : value
-    } })
-    try { assert.throws(() => captureHermes(store, 'a', { env }), /injected/) } finally { store.db = original }
-  }
-  insert(1); failCommit()
-  captureHermes(store, 'a', { env })
-  insert(2); failCommit()
-  const result = captureHermes(store, 'a', { env }), file = store.source(result.session).path
-  assert.deepEqual(readFileSync(file, 'utf8').trim().split('\n').map(x => JSON.parse(x).id), [1, 2])
-  assert.equal(store.stats(result.session).records, 2)
-  appendFileSync(file, '{')
-  assert.throws(() => captureHermes(store, 'a', { env }), /partial tail/)
-  assert.match(readFileSync(file, 'utf8'), /\{$/, 'damaged bytes are preserved for inspection')
 })
 
 test('a pending summary renews its lease and does not allow a second billed call', async t => {

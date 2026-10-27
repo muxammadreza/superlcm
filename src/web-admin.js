@@ -1,10 +1,10 @@
 // Connect view (setup + local import), status pill, settings, appearance and boot().
 const WRITERS = [
-  ['agent', t('对话模型生成'), t('正在聊天的 AI 凭记忆顺手写，几乎不多花钱')],
-  ['cli', t('本工具后台写'), t('另起一个该工具的进程来写，用它已配置的模型，不占用正在聊的对话')],
-  ['api', t('自定义 API'), t('后台单独写 · 使用你的 API 密钥')],
+  ['main-fork', t('主模型后台分支'), t('沿用当前对话模型，在后台一次生成分块摘要')],
+  ['api', t('独立摘要模型（高级）'), t('使用已保存的 API 模型')],
   ['off', t('关闭（摘要方式）'), t('不生成摘要，原文照常保存')]
 ]
+
 const writerLabel = mode => WRITERS.find(w => w[0] === mode)?.[1] || mode
 const kfmt=n=>Math.round(n/1000)+'K'
 const admin = { settings: null, catalog: {}, modelEdit: null, compression: { runtimes: [], jobs: [] }, outdated: false }
@@ -63,8 +63,9 @@ function renderTools() {
     const rows = [[t('状态'), esc(s.text)], [t('已存对话'), count ? t('{n} 个', { n: fmt(count) }) : '<span class="muted">' + t('暂无') + '</span>']]
     rows.push(...writerRows(h))
     if (h.claude) rows.push(...claudeRows(h))
-    const takeover=h.harness==='claude-code'?admin.settings?.takeover.enabled:h.harness==='dsh'&&h.dsh?.profiles.some(p=>p.enabled&&!p.archive_only)
-    rows.push([t('上下文压缩'),'<span class="muted">'+(takeover?t('SuperLcm 接管已开启'):t('由 {tool} 自身负责',{tool:toolName(h.harness)}))+'</span>'])
+    const takeover=h.harness==='claude-code'?admin.settings?.takeover.enabled:h.harness==='pi'?h.compaction_policy?.enabled:h.harness==='dsh'&&h.dsh?.profiles.some(p=>p.enabled&&!p.archive_only)
+    rows.push([t('上下文压缩'),'<span class="muted">'+(takeover?t('SuperLcm 接管已开启'):t('由 {tool} 自身负责',{tool:toolName(h.harness)}))+'</span>'+(['claude-code','pi','dsh'].includes(h.harness)?' <button type="button" class="btn small" data-goto-compact="'+h.harness+'">'+t('设置接管')+'</button>':'')])
+    if((admin.settings?.settings.find(x=>x.harness===h.harness)?.mode||admin.settings?.global?.mode)==='main-fork')rows.push([t('后台准备'),'<span class="muted">'+t('约 {prepare}% 时一次生成分块与上层摘要。',{prepare:Math.round(((h.harness==='claude-code'?admin.settings?.takeover.ratio:h.harness==='pi'?h.compaction_policy?.ratio:h.harness==='dsh'?dshControls.value?.compressionRatio??admin.settings?.compression_ratios?.dsh:null)??.8)*100)-10})+'</span>'])
     return '<article class="tcard' + (h.detected ? '' : ' dim') + '"><header class="tc-h">' + mark(h.harness, 'lg') + '<div class="tc-name"><div class="tn">' + esc(toolName(h.harness)) + '</div>' + (h.detected ? '' : '<div class="tv">' + t('本机未检测到') + '</div>') + '</div><span class="state ' + s.cls + '">' + esc(s.badge) + '</span></header>' +
       '<dl class="tc-kv">' + rows.map(([k, v]) => '<div><dt>' + k + '</dt><dd>' + v + '</dd></div>').join('') + '</dl>' +
       (buttons ? '<footer class="tc-f">' + buttons + '</footer>' : '') + '</article>'
@@ -72,7 +73,7 @@ function renderTools() {
   for (const b of $('#tools').querySelectorAll('[data-manage]')) b.onclick = () => openConnectionManager(b.dataset.manage)
   for (const b of $('#tools').querySelectorAll('[data-import]')) b.onclick = () => openImport(b.dataset.import)
   for (const b of $('#tools').querySelectorAll('[data-plugin]')) b.onclick = () => pluginAct(b.dataset.plugin, b)
-  for (const b of $('#tools').querySelectorAll('[data-goto-compact]')) b.onclick = () => show('compression/claude-code')
+  for (const b of $('#tools').querySelectorAll('[data-goto-compact]')) b.onclick = () => show('compression/'+b.dataset.gotoCompact)
   for (const select of $('#tools').querySelectorAll('select[data-tool]')) select.onchange = () => {
     const harness = select.dataset.tool, x = admin.settings.settings.find(y => y.harness === harness), models = admin.settings.api_models
     // Custom API picks one of the models added in Settings; with none yet, go add one first.
@@ -138,12 +139,12 @@ async function openSetup(harness) {
   const name = toolName(harness)
   const steps = [[t('检查本机配置'), ''], [t('写入 SuperLcm 配置（先备份原文件）'), ''], [t('验证能否正常加载'), '']]
   let preview = null, busy = false, lastCheck = null, reviewOpened = false, approveHooks = true
-  const needsApproval = harness === 'codex' || harness === 'hermes'
+  const needsApproval = harness === 'codex'
   const render = (message = '', cls = 'calm', finished = false, extra = '') => overlay('<div class="modal" role="dialog" aria-labelledby="stitle"><div class="card"><div class="card-h"><div><h3 id="stitle">' + t('接入 {tool}', { tool: esc(name) }) + '</h3><p>' + t('接入后，{tool} 的对话会自动保存，其中的 AI 也能查阅全部已存对话。', { tool: esc(name) }) + '</p></div><button type="button" class="x" data-close aria-label="' + t('关闭') + '"' + (busy ? ' disabled' : '') + '>×</button></div><div class="card-b">' +
     '<ol class="steps">' + steps.map(([t, s]) => '<li class="' + s + '"><span>' + esc(t) + '</span></li>').join('') + '</ol>' +
     (preview ? '<details><summary>' + t('将修改的文件') + '</summary><div class="packet">' + esc([t('MCP 配置：') + preview.files.mcp + (preview.mcp_action === 'preserve' ? t('（已存在，保持不变）') : ''), t('事件钩子：') + preview.files.hooks + (preview.hook_events_added.length ? t('（新增 {list}）', { list: preview.hook_events_added.join(', ') }) : t('（已齐全）')), t('数据位置：') + preview.index_home].join('\n')) + '</div></details>' : '') +
     (message ? '<div class="notice ' + cls + '"><span>' + message + '</span></div>' : '') +
-    // Codex and Hermes ask the user to approve new hooks; offer to do that step for them (their own documented way).
+    // Codex asks the user to approve new hooks; offer to do that step for them (their own documented way).
     (!finished && needsApproval && preview?.can_apply ? '<label class="check"><input type="checkbox" id="approveHooks"' + (approveHooks ? ' checked' : '') + (busy ? ' disabled' : '') + '><span><b>' + t('同时替我在 {tool} 里允许', { tool: esc(name) }) + '</b>' + t('相当于替你在 {tool} 里点一次「允许」，只针对 SuperLcm 自己的钩子。不勾的话，接入后要打开 {tool} 亲自确认。', { tool: esc(name) }) + '</span></label>' : '') +
     '<div class="actions">' + (finished ? extra + '<button type="button" class="btn' + (extra ? '' : ' primary') + '" data-close>' + t('完成') + '</button>' : '<button type="button" class="btn primary" id="applySetup"' + (preview?.can_apply && !busy ? '' : ' disabled') + '>' + t('确认接入') + '</button><button type="button" class="btn" data-close' + (busy ? ' disabled' : '') + '>' + t('取消') + '</button>') + '</div></div></div></div>', root => {
     root.querySelector('#applySetup')?.addEventListener('click', apply)
@@ -216,6 +217,7 @@ async function openImport(harness) {
 async function loadSettings() {
   const s = admin.settings = await api('/api/settings')
   renderApiModels(); renderTuning(s.tuning); renderTakeover(s.takeover)
+  renderForkModelPicker('claude-code');renderForkModelPicker('pi')
   if (state.harnesses) renderTools()
   $('#dataDir').value = s.index_home || ''
 }
@@ -304,9 +306,10 @@ function writerRows(h) {
   if (!s) return []
   const x = s.settings.find(y => y.harness === h.harness)
   if (!h.supported && !h.detected && !x) return []
-  const savedMode=x?x.mode:s.global.mode,mode=h.harness==='dsh'&&!['api','off'].includes(savedMode)?'off':savedMode,rows=[]
-  const writers=h.harness==='dsh'?WRITERS.filter(w=>['api','off'].includes(w[0])):WRITERS
+  const savedMode=x?x.mode:s.global.mode,mode=savedMode==='agent'?'main-fork':savedMode,rows=[]
+  const writers=mode==='cli'?[['cli',t('兼容模式：旧版后台写')],...WRITERS]:WRITERS
   rows.push([t('摘要生成'), '<select aria-label="' + t('摘要生成') + '" data-tool="' + esc(h.harness) + '">' + writers.map(([id, label]) => '<option value="' + id + '"' + (mode === id ? ' selected' : '') + '>' + label + '</option>').join('') + '</select>'])
+  if (mode === 'main-fork') rows.push([t('模型'), '<span>'+t('跟随当前对话模型与账号')+'</span>'])
   if (mode === 'cli' && h.bin) rows.push([t('模型'), '<select aria-label="' + t('模型') + '" data-model="' + esc(h.harness) + '"><option value="' + esc(x?.model || '') + '">' + esc(x?.model || t('跟随 {tool} 当前模型', { tool: toolName(h.harness) })) + '</option></select>'])
   if (mode === 'cli' && h.harness === 'claude-code' && h.claude?.plugin?.enabled) rows.push(['', '<span class="muted">' + t('Claude Code 2.1.286+ 在对话里直接调用这个模型，不另开会话；对话结束后剩下的交给后台命令行补完') + '</span>'])
   if (mode === 'api') {
@@ -338,25 +341,18 @@ function markSize(group, key, value) {
   const buttons = [...$(group).querySelectorAll('[data-' + key + ']')], preset = buttons.some(b => Number(b.dataset[key]) === value)
   for (const b of buttons) b.setAttribute('aria-checked', String(Number(b.dataset[key]) === value))
   const custom = $(group).querySelector('[data-custom]')
-  custom.setAttribute('aria-checked', String(!preset)); custom.querySelector('small').textContent = preset ? '' : kfmt(value)
+  custom.setAttribute('aria-checked', String(!preset)); custom.querySelector('small').textContent = preset ? '' : key==='r'?value+'%':kfmt(value)
   if (preset) $(group + 'Custom').hidden = true
 }
 function renderTakeover(x) {
   if(x)renderCompressionOwner('#claudeCompressionOwner',x.enabled)
   if (!x) return
   $('#takeoverOn').checked = x.enabled
-  markSize('#takeoverWindow', 'w', x.window); markSize('#takeoverKeep', 'k', x.keep)
-  const c = state.harnesses?.find(h => h.harness === 'claude-code')?.claude, items = []
-  if (!c) items.push(['wait', t('正在检查 Claude Code…')])
-  else {
-    items.push(c.plugin?.enabled ? ['ok', t('SuperLcm 插件已启用 · v{v}', { v: esc(c.plugin.version) })] : ['no', t('还没装 SuperLcm 插件，接管要靠它') + ' <button type="button" class="link" data-goto-connect>' + t('去安装') + '</button>'])
-    for (const [name, v, ok] of moduleSupport(c)) items.push(ok ? ['ok', t('{name} Claude Code {v} 支持接管', { name, v: esc(v) })] : ['no', t('{name} Claude Code {v} 还不支持，要 {min} 或更新；它更新后自动生效', { name, v: esc(v), min: c.modules_min })])
-  }
-  const mode = admin.settings?.settings.find(s => s.harness === 'claude-code')?.mode
-  items.push(mode === 'off' ? ['no', t('Claude Code 的摘要是关闭的，没有摘要就只能交回 Claude Code 压缩')] : ['ok', t('Claude Code 的摘要：{m}', { m: esc(writerLabel(mode || 'agent')) })])
-  items.push(['info', x.enabled ? t('Claude Code 到 {t} 开始压缩，SuperLcm 当场换上摘要（摘要没跟上时由 Claude Code 自己总结）；它显示的窗口为 {w}，关闭后恢复原来的设置', { t: kfmt(x.window), w: kfmt(x.claude_window || x.window) }) : t('关闭中，Claude Code 的压缩窗口保持 {w}', { w: x.claude_window ? kfmt(x.claude_window) : t('默认') })])
-  $('#takeoverChecks').innerHTML = items.map(([cls, text]) => '<li class="' + cls + '">' + text + '</li>').join('')
-  $('#takeoverChecks').querySelector('[data-goto-connect]')?.addEventListener('click', () => show('connect'))
+  const percent=Math.round((x.ratio??.8)*100)
+  markSize('#takeoverRatio','r',percent)
+  $('#claudePreparationHint').textContent=t('约 {prepare}% 时在后台准备，{replace}% 时直接替换已完成摘要。',{prepare:percent-10,replace:percent})
+  markSize('#takeoverKeep', 'k', x.keep)
+
 }
 async function loadCompression() {
   if(admin.outdated) return
@@ -373,21 +369,21 @@ async function loadCompression() {
   }
 }
 const saveTakeover = (change, control) => act(async () => {
-  const cur = admin.settings.takeover, r = await api('/api/takeover', { enabled: cur.enabled, window: cur.window, keep: cur.keep, ...change })
+  const cur = admin.settings.takeover, r = await api('/api/takeover', { enabled: cur.enabled, ratio: cur.ratio??.8, keep: cur.keep, ...change })
   admin.settings.takeover = r; renderTakeover(r); if (state.harnesses) renderTools()
-  toast(r.enabled ? t('已打开 · 门槛 {w}，保留最近 {k}，新开的 Claude Code 对话生效', { w: kfmt(r.window), k: kfmt(r.keep) }) : t('已关闭，Claude Code 的压缩窗口已恢复'))
+  toast(t('压缩设置已保存'))
 }, control)
 $('#takeoverOn').onchange = e => saveTakeover({ enabled: e.target.checked }, e.target)
-for (const b of $('#takeoverWindow').querySelectorAll('[data-w]')) b.onclick = () => saveTakeover({ window: Number(b.dataset.w) }, b)
+for (const b of $('#takeoverRatio').querySelectorAll('[data-r]')) b.onclick = () => saveTakeover({ ratio: Number(b.dataset.r)/100 }, b)
 for (const b of $('#takeoverKeep').querySelectorAll('[data-k]')) b.onclick = () => saveTakeover({ keep: Number(b.dataset.k) }, b)
 // 自定义: opens a box for a size in K, checked against the same limits the server enforces.
-for (const [group, field] of [['#takeoverWindow', 'window'], ['#takeoverKeep', 'keep']]) {
+for (const [group, field] of [['#takeoverRatio', 'ratio'], ['#takeoverKeep', 'keep']]) {
   const box = $(group + 'Custom'), input = box.querySelector('input'), save = box.querySelector('button')
-  $(group).querySelector('[data-custom]').onclick = () => { box.hidden = false; input.value = Math.round(admin.settings.takeover[field] / 1000); input.focus(); input.select() }
+  $(group).querySelector('[data-custom]').onclick = () => { box.hidden = false; input.value = field==='ratio'?Math.round((admin.settings.takeover.ratio??.8)*100):Math.round(admin.settings.takeover[field]/1000); input.focus(); input.select() }
   const submit = () => {
     const k = Number(input.value), min = Number(input.min), max = Number(input.max)
-    if (!Number.isFinite(k) || k < min || k > max) { toast(t('请输入 {min} 到 {max} 之间的数', { min, max })); return }
-    saveTakeover({ [field]: Math.round(k) * 1000 }, save)
+    if (!Number.isInteger(k) || k < min || k > max) { toast(t('请输入 {min} 到 {max} 之间的数', { min, max })); return }
+    saveTakeover({ [field]: field==='ratio'?k/100:k*1000 }, save)
   }
   save.onclick = submit
   input.onkeydown = e => { if (e.key === 'Enter') submit() }

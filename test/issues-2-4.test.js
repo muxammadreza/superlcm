@@ -158,7 +158,7 @@ test('actual compact-packet writes decline, exception and success diagnostics to
  assert.equal(store.lastCompactionDiagnostic('s').status,'error');assert.doesNotMatch(JSON.stringify(store.lastCompactionDiagnostic('s')),/SECRET|CREDENTIAL/)
  // This case checks stored diagnostics, not the developer's installed tools.
  // Never discover real logins or wait on host MCP commands during this test.
- const diagnosticEnv={...env,...Object.fromEntries(['SUPERLCM_CLAUDE_CLI_BIN','SUPERLCM_CODEX_CLI_BIN','SUPERLCM_HERMES_BIN','SUPERLCM_PI_BIN','SUPERLCM_DSH_BIN'].map(key=>[key,join(dir,'uninstalled-'+key)]))}
+ const diagnosticEnv={...env,...Object.fromEntries(['SUPERLCM_CLAUDE_CLI_BIN','SUPERLCM_CODEX_CLI_BIN','SUPERLCM_PI_BIN','SUPERLCM_DSH_BIN'].map(key=>[key,join(dir,'uninstalled-'+key)]))}
  const diagnostics=spawnSync(process.execPath,['src/cli.js','doctor-local'],{env:diagnosticEnv,encoding:'utf8',timeout:15000})
  assert.equal(diagnostics.status,0,diagnostics.stderr)
  assert.equal(JSON.parse(diagnostics.stdout).compaction_diagnostics[0].code,'planner_exception')
@@ -262,16 +262,14 @@ test('a real summary-check renews the lease and rejects stale setting revisions'
 import * as summarySettings from '../src/summarize.js'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
-import { summarizeWithHermes } from '../src/cli-writers.js'
 import { summarizeWithCodexCli } from '../src/codex-cli.js'
 const fakeProcess=output=>()=>{
  const child=Object.assign(new EventEmitter(),{stdin:new PassThrough(),stdout:new PassThrough(),stderr:new PassThrough(),kill:()=>{}})
  queueMicrotask(()=>{child.stdout.end(output);child.stderr.end();child.emit('close',0)})
  return child
 }
-test('Hermes length termination and Codex missing final turn cannot enter repair or storage',async t=>{
+test('Codex missing final turn cannot enter repair or storage',async t=>{
  const {dir}=fixture(t)
- await assert.rejects(summarizeWithHermes('Source',{bin:'synthetic',cwd:join(dir,'hermes'),summaryTask:{allowOversize:true},spawnProcess:fakeProcess(JSON.stringify({type:'result',exit_code:0,text:'Partial summary',finish_reason:'length'})+'\n')}))
  const message=JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'Partial summary'}})+'\n'
  await assert.rejects(summarizeWithCodexCli('Source',{bin:'synthetic',cwd:join(dir,'codex'),summaryTask:{allowOversize:true},spawnProcess:fakeProcess(message)}),/incomplete/)
  assert.equal(await summarizeWithCodexCli('Source',{bin:'synthetic',cwd:join(dir,'codex'),summaryTask:{allowOversize:true},spawnProcess:fakeProcess(message+JSON.stringify({type:'turn.completed'})+'\n')}),'Partial summary')

@@ -81,9 +81,9 @@ test('native archive preserves raw events, deduplicates replay and supports cros
     assert.equal(store.stats(result.session).records, 2)
     const handoff = await call(store, 'lcm_continue', { conversation: '#' + result.code })
     assert.match(JSON.stringify(handoff), /接续 Claude 的任务/)
-    store.setGlobalSetting('agent')
+    store.setGlobalSetting('off')
     assert.equal(store.effectiveSetting(result.session).mode, 'off')
-    await assert.rejects(call(store, 'lcm_summary_task', { conversation: '#' + result.code }), /not enabled/)
+    await assert.rejects(call(store, 'lcm_summary_task', { conversation: '#' + result.code }), /Unknown tool/)
   } finally { store.close() }
 })
 
@@ -132,7 +132,7 @@ test('DSH coverage counts exact original surface messages, not metadata or previ
     assert.deepEqual(stats.latest_tail, { from: 8, to: 10, records: 2, ranges: stats.unsummarized_ranges })
     assert.deepEqual(store.outline(session).unsummarized, stats.latest_tail)
     for (const key of ['records', 'raw_records', 'summarized_records', 'unsummarized_records', 'unsummarized_ranges', 'latest_tail']) assert.deepEqual(listed[key], stats[key])
-    assert.equal(listed.summary_mode, 'off')
+    assert.equal(listed.summary_mode, 'main-fork')
   } finally { native.close(); store.close() }
 })
 

@@ -1,3 +1,4 @@
+import {mountDshPersistence} from '../src/dsh-persistence.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {mkdtempSync,writeFileSync,readFileSync} from 'node:fs'
@@ -61,8 +62,8 @@ test('the worker also refuses an existing current artifact, even when the provid
 })
 test('the full backend lists and imports a real released historical artifact through the official persistence provider',async t=>{
  const f=fixture(t),root=join(f.dir,'native/sessions');const {dshHost}=await import('../src/dsh-connection.js'),{pathToFileURL}=await import('node:url'),{dirname}=await import('node:path'),{mkdirSync}=await import('node:fs')
- const host=dshHost(),load=name=>import(pathToFileURL(host.require.resolve(name)).href),[{Context},{default:Persistence}]=await Promise.all([load('@deepseek-ai/cordis'),load('@deepseek-ai/dsh-session-persistence-jsonl')])
- const ctx=new Context(),persistence=new Persistence(ctx,{root,compression:'zstd'});t.after(()=>ctx.fiber.dispose())
+ const host=dshHost(),load=name=>import(pathToFileURL(host.require.resolve(name)).href),[{Context},persistenceModule]=await Promise.all([load('@deepseek-ai/cordis'),load('@deepseek-ai/dsh-session-persistence-jsonl')])
+ const ctx=new Context(),persistence=await mountDshPersistence(ctx,persistenceModule,{root,compression:'zstd'});t.after(()=>ctx.fiber.dispose())
  await persistence.listArtifacts() // Initialize the official root encoding before placing a fixture.
  const location=persistence.locate(header);mkdirSync(dirname(location.path),{recursive:true});writeFileSync(join(dirname(location.path),'session.jsonl.zstd'),f.bytes)
  const {dshConversations,importDshConversation}=await import('../src/dsh-history.js'),env={...process.env,DSH_HOME:join(f.dir,'native')}

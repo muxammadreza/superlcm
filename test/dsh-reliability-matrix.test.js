@@ -209,11 +209,11 @@ for(const broken of [false,true])test(`200K ${broken?'unfinished committed closu
   evidence.push({scenario:'real-process-restart-'+broken,status:'passed',...results[1]})
 })
 
-for(const threshold of [.7,.8,.9,.01])test(`200K custom switch ratio ${threshold}`,async()=>scenario('ratio-'+threshold,{fixed:threshold===.01?120000:0,config:automaticRatios(threshold)},async h=>{
+for(const threshold of [.7,.8,.9,.11])test(`200K custom switch ratio ${threshold}`,async()=>scenario('ratio-'+threshold,{fixed:threshold===.11?120000:0,config:automaticRatios(threshold)},async h=>{
   history(h,.92)
   const errors=await send(h,'CURRENT_CUSTOM_RATIO')
   await h.engine.settleBackgroundFold(h.agent)
-  if(threshold===.01){assert.ok(errors.length);assert.equal(h.calls.length,0);remember(h);return {explicitSafeRefusal:true,summaryCalls:0,originalEvents:h.originals.size}}
+  if(threshold===.11){assert.ok(errors.length);assert.equal(h.calls.length,0);remember(h);return {explicitSafeRefusal:true,summaryCalls:0,originalEvents:h.originals.size}}
   assert.deepEqual(errors,[]);assert.ok(h.main.length);return await checkpoint(h)
 }))
 

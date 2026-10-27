@@ -1,14 +1,28 @@
 # Changelog
 
-## 0.5.37 — 2026-10-23
+## 0.6.0 — 2026-10-24
+
+- 统一 Claude Code、Pi、DSH 压缩页；Pi/DSH 增加最近原文保留量，按当前对话预算缩小目标，保留工具组边界。摘要粒度与每组摘要合并数量只从全局“设置”读取；配置变化使已准备结果失效。
+
+- 补齐 Pi 后台分支与容量等待的硬截止时间，拦截最终请求中的大工具定义和实际输出预留；隔离切换会话、切换模型后的晚到回调，拒绝空结果卡住，重试改为递增等候。修复关闭接管后无法生成后台摘要的问题。见[故障审查记录](docs/SAFETY-AUDIT-20261024.md)。
+
+- 四种工具默认使用主模型后台分支；一次返回叶片、父摘要和根节点，核验后原子保存。移除聊天轮次中的摘要写入工具。
+- Pi 与 dsh 支持独立后台摘要和可选压缩接管；正常约70%准备、80%只安装已完成结果。继承主模型、账号和请求前缀，记录实际供应商用量。
+- 保留明确的 API 和关闭设置；旧聊天摘要及普通后台模式一次性迁移。工具页合并摘要方式和可选接管，Codex 保留原生压缩。
+- 修复 dsh 新版账户适配器空模型目录导致接入弹窗报错，并兼容新版历史持久化插件的正式生命周期接口。
+
+## Earlier unreleased changes
+
+- 移除 Hermes 接入、自动归档、摘要写入、模型目录与历史导入适配，删除后台卡片、筛选项、图标和当前文档中的支持说明。旧钩子静默停用，旧登记及摘要任务停用；历史归档保留用于原文查回，后台列表与搜索不再展示。
+- 修复 #17：宿主移动对话文件后，逐条核对原始摘要索引、私有归档和新文件的已归档前缀，确认一致才更新路径并继续增量归档。拒绝截短、篡改、类型冲突或归档缺失的记录。
+- 修复 #18：Claude Code 的 `api-request*` 请求副本保留在原文归档中，但不参与摘要、语言判断、工具配对和实时对话匹配。明确的人类新轮次或原生压缩检查点可以结束已中断的工具等待；任务通知和来源不明的记录不能解除等待。
+- 经归档核验的轮次边界同时用于普通压缩和主模型补救压缩，防止摘要已就绪却继续等待中断的旧工具。调用方自带的边界标记、重复文本混淆和任务通知不能授权清空等待。
+- 增加 23 项回归测试。感谢 @muxammadreza 在 [#17](https://github.com/yu381792/superlcm/issues/17) 和 [#18](https://github.com/yu381792/superlcm/issues/18) 提供复现与修复思路。
+
+## Fork patch on 0.6.0 — 2026-10-27
 
 - Fix summaries of Persian conversations coming out in Arabic. Summary language detection only looked at the script, so Persian, Arabic and Urdu all became “the user's Arabic-script language”, and models read that as Arabic. Detection now tells the three apart by the letters only one of them uses (Persian پ چ ژ گ ک ی, Arabic ة ك ي ى, Urdu ٹ ڈ ڑ ں ے) and names the language in the prompt; text that doesn't settle it keeps the script-only instruction. A summary written in the wrong one of the three is rejected, and the original content is kept. Summaries already written are not changed.
 
-## 0.5.36 — 2026-10-23
-
-- Fix Claude summaries freezing, and every compaction falling back to Claude Code's own, in conversations recorded by Claude Code 2.1.300+ (seen mostly in long worktree sessions). Claude Code now writes a copy of each API request into the transcript (`api-request`, `api-request-shape`, `api-request-blob`). Read as messages, the copies reopened tool calls that had already returned, so no summary segment could close. Summary text, tool pairing, summary language detection and the conversation-model rescue's archive matching now skip these copies.
-- A tool call cut off by a prompt the person typed, or by a compaction, never returns; it no longer holds the summary segment open. Task notifications still leave open calls alone.
-- Follow a Claude transcript that Claude Code moves when a session's folder changes (resuming in the main folder after a worktree, or a desktop scratch workspace opened on a project), instead of failing with “Session already bound to a different source” and freezing capture. The new file is followed only when it starts with the already-indexed bytes.
 
 ## 0.5.35 — 2026-10-16
 

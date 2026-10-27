@@ -1,3 +1,4 @@
+import { captureMainRequest, forkScope } from './main-fork.js'
 import { isAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { pressureStep } from './ratio-runtime.js'
 import { SessionFoldRegistry } from './summary-guards.js'
@@ -16,10 +17,12 @@ export function nativePreStep(engine, payload) {
 export function registerRequestBoundary(engine) {
   const pending = new SessionFoldRegistry()
   engine.ctx.on('llm/stream',(options,next)=>{
+    if (forkScope.getStore()) return next()
     const agent=engine.requestAgents?.get(options.sessionId)?.deref()
     if (!agent || !engine.config.auto || !isAgentLoopRequest(options)) return next()
     return (async function* () {
       const generation=agent.session.surface.replaceGeneration
+      if (engine.rollingConfig.summaryMode === 'main-fork') captureMainRequest(engine,agent,options)
       await pressureStep(engine,agent,options.signal)
       if (agent.session.surface.replaceGeneration!==generation) {
         pending.set(agent,agent.session.surface.replaceGeneration)

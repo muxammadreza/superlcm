@@ -6,7 +6,7 @@ import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {ClaudeStore} from '../src/store.js'
 import {dshSetupPreview,applyDshSetup} from '../src/dsh-setup.js'
-import {dshCompressionSettings,saveDshCompression,controlsPath} from '../src/dsh-controls.js'
+import {dshCompressionSettings,saveDshCompression,controlsPath,rawControls} from '../src/dsh-controls.js'
 import {dshConfiguration} from '../src/dsh-catalog.js'
 import {dshEntries,inspectDshTree} from '../src/dsh-connection.js'
 import {controlsConfig,readControls} from '../dsh/controls-config.js'
@@ -51,13 +51,13 @@ test('DSH optional takeover changes only compaction and reconnect restores origi
   }
 })
 test('off saves without a summary route; on rejects missing route without touching files',async t=>{
-  const {store,env}=await fixture(t,false),initial=await dshCompressionSettings(store,{env})
+  const {store,env}=await fixture(t,false);store.setHarnessSetting('dsh','api','fixture','openai','https://example.test/v1/chat/completions');const initial=await dshCompressionSettings(store,{env})
   const saved=await saveDshCompression(store,{...initial,enabled:false,minRetainTokens:40000},{env})
   assert.equal(readControls(controlsPath(store)).config.minRetainTokens,40000)
   const before=(await dshConfiguration({env})).profiles.map(p=>p.patch),raw=readFileSync(controlsPath(store),'utf8')
   await assert.rejects(saveDshCompression(store,{...saved,enabled:true},{env}),/模型/)
   assert.deepEqual((await dshConfiguration({env})).profiles.map(p=>p.patch),before);assert.equal(readFileSync(controlsPath(store),'utf8'),raw)
-  assert.doesNotThrow(()=>controlsConfig({auto:false}));assert.throws(()=>controlsConfig({auto:true}),/模型/)
+  assert.doesNotThrow(()=>controlsConfig({auto:false}));assert.doesNotThrow(()=>controlsConfig({auto:true,summaryMode:'main-fork'}));assert.throws(()=>controlsConfig({auto:true,summaryMode:'api'}),/模型/)
 })
 test('console links use the recorded port or explicit public address, never DSH credentials',()=>{
   const store={dir:mkdtempSync(join(tmpdir(),'slcm-console-link-'))}
@@ -68,14 +68,19 @@ test('console links use the recorded port or explicit public address, never DSH 
   assert.match(source('dsh/ui/client.js'),/target.search=''/)
 })
 test('dedicated navigation, accessible tabs and DSH deep links select independent panels',()=>{
-  const html=page('fixture');assert.ok(html.indexOf('data-view="connect"')<html.indexOf('data-view="compression"'));assert.ok(html.indexOf('data-view="compression"')<html.indexOf('data-view="settings"'))
+  const html=page('fixture');assert.match(html,/data-view="connect">工具/);assert.match(html,/data-view="compression">压缩/);assert.doesNotMatch(source('src/web-client.js'),/takeoverPanel/);
   assert.ok(!html.includes('data-sec="compact"'))
+  assert.doesNotMatch(html,/takeoverChecks|<h3>运行条件|<summary>它怎么工作/)
   const buttons=['claude-code','dsh'].map(tool=>({dataset:{compressionTool:tool},setAttribute(k,v){this[k]=v},focus(){this.focused=true}}))
   const panels=['claude-code','dsh'].map(tool=>({dataset:{compression:tool},hidden:false}))
   const context={state:{},document:{querySelectorAll:selector=>selector==='[data-compression-tool]'?buttons:panels,querySelector:selector=>buttons.find(b=>selector.includes(b.dataset.compressionTool))},history:{replaceState(_a,_b,hash){context.hash=hash}},dshControls:{value:{},loading:false},renderDshControls(){context.loaded=true},act(){throw Error('unexpected API call')},$(){return null}}
   runInNewContext(source('src/web-compression.js')+'\ncompressionSection("dsh")',context)
   assert.equal(context.hash,'#compression/dsh');assert.equal(panels[0].hidden,true);assert.equal(panels[1].hidden,false);assert.equal(buttons[1]['aria-selected'],'true');assert.equal(context.loaded,true)
   buttons[1].onkeydown({key:'Home',preventDefault(){}});assert.equal(panels[0].hidden,false);assert.equal(buttons[0].focused,true)
+  assert.match(html,/aria-orientation="horizontal"/)
+  buttons[0].onkeydown({key:'ArrowRight',preventDefault(){}});assert.equal(panels[1].hidden,false);assert.equal(buttons[1].focused,true)
+  buttons[1].onkeydown({key:'ArrowLeft',preventDefault(){}});assert.equal(panels[0].hidden,false)
+  buttons[0].onkeydown({key:'ArrowLeft',preventDefault(){}});assert.equal(panels[1].hidden,false)
 })
 
 test('failed official CLI validation rolls back the opt-in graph and leaves saved controls unchanged',async t=>{
@@ -107,6 +112,8 @@ test('closing and stale-version owners remain pending until current engine and a
   engine.version='new';context.admin.compression.runtimes.push({kind:'archive',live:true,version:'new',pid:2,profile:'web'})
   runInNewContext(status+'dshSettingsStatus()',context);assert.equal(badge.pending,true)
   context.admin.compression.runtimes[1].pid=1;runInNewContext(status+'dshSettingsStatus()',context);assert.equal(badge.pending,false)
+  context.$=selector=>selector==='#dshCompressionOwner'?node:null
+  engine.version='old';runInNewContext(status+'dshSettingsStatus()',context);assert.equal(badge.pending,true)
 })
 
 test('bundle re-enable only resumes archiving and never opts into compaction',()=>{
@@ -164,9 +171,51 @@ test('DSH ownership reminder is hidden while off and visible for takeover or a s
 
 test('Claude ownership badge is visible only while takeover is enabled',()=>{
   const badge={},context={$:()=>badge,t:x=>x}
-  const code=source('src/web-compression.js').slice(source('src/web-compression.js').indexOf('function renderCompressionOwner'))
+  const code=source('src/web-compression.js').slice(source('src/web-compression.js').indexOf('function renderCompressionOwner'),source('src/web-compression.js').indexOf('const nativeForkModels'))
   runInNewContext(code+'renderCompressionOwner("#claudeCompressionOwner",false)',context);assert.equal(badge.hidden,true)
   runInNewContext(code+'renderCompressionOwner("#claudeCompressionOwner",true)',context);assert.equal(badge.hidden,false)
   assert.equal(badge.textContent,'SuperLcm 接管')
   assert.match(page('fixture'),/id="claudeCompressionOwner" hidden/)
+})
+
+test('changing the shared DSH summary route invalidates an already opened compression form',async t=>{
+ const {store,env}=await fixture(t)
+ const before=await dshCompressionSettings(store,{env}),raw=rawControls(store)
+ store.setHarnessSetting('dsh','off')
+ await assert.rejects(saveDshCompression(store,{...before,enabled:false},{env}),/已变化/)
+ assert.equal(rawControls(store),raw)
+ assert.equal(store.harnessSetting('dsh').mode,'off')
+})
+
+test('DSH retention persists while granularity follows Settings and stale per-tool tuning cannot override it',async t=>{
+ const {store,env}=await fixture(t),initial=await dshCompressionSettings(store,{env})
+ const saved=await saveDshCompression(store,{...initial,keep:80000},{env})
+ const config=await dshConfiguration({env}),patches=config.profiles.map(p=>p.patch)
+ const old=readControls(controlsPath(store));assert.equal(old.config.keepRecentTokens,80000)
+ store.setTuning({target_tokens:10000,fanout:6})
+ const updated=readControls(controlsPath(store))
+ assert.equal(updated.config.foldBatchTokens,10000);assert.equal(updated.config.condensedMinFanout,6)
+ assert.notEqual(updated.revision,old.revision)
+ await assert.rejects(saveDshCompression(store,{...saved,keep:20000},{env}),/已变化/)
+ const current=await dshCompressionSettings(store,{env});assert.equal(current.keep,80000)
+ await saveDshCompression(store,{...current,foldBatchTokens:64000,condensedMinFanout:2},{env})
+ const actual=readControls(controlsPath(store)).config
+ assert.equal(actual.foldBatchTokens,10000);assert.equal(actual.condensedMinFanout,6);assert.equal(actual.keepRecentTokens,80000)
+ assert.deepEqual((await dshConfiguration({env})).profiles.map(p=>p.patch),patches)
+ for(const keep of [null,4999,200001,5000.5]) {
+  const before=await dshCompressionSettings(store,{env}),raw=rawControls(store)
+  await assert.rejects(saveDshCompression(store,{...before,keep},{env}),/原文保留/)
+  assert.equal(rawControls(store),raw)
+ }
+})
+
+test('integrated DSH ratio defaults match the visible 40K; legacy token retention survives smaller global chunks',async t=>{
+ const {store,env}=await fixture(t)
+ for(const budgetMode of ['ratio','tokens']) {
+  writeFileSync(controlsPath(store),JSON.stringify({format:1,revision:'legacy-without-keep',config:controlsConfig({auto:false,budgetMode,foldBatchTokens:40000,pressureFoldTokens:20000})}))
+  store.setTuning({target_tokens:10000,fanout:3})
+  const controls=readControls(controlsPath(store))
+  assert.equal(controls.config.foldBatchTokens,10000);assert.equal(controls.config.pressureFoldTokens,10000)
+  assert.equal((await dshCompressionSettings(store,{env})).keep,budgetMode==='ratio'?40000:32000)
+ }
 })

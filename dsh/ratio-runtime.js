@@ -36,7 +36,7 @@ export async function resolvePolicy(engine, agent, signal) {
   const fixedTokens = priced.nodes.filter(n => agent.session.eventAt(n.seq).type === 'system/message').reduce((sum,n) => sum+n.tokens,0)
     + Math.ceil((identity.tools.length ? JSON.stringify(identity.tools).length / 4 + 4 : 0) * priced.factor)
   const policy = deriveRatioPolicy(engine.rollingConfig, { contextWindow: info.context?.contextWindow,
-    reservedCompletionTokens: identity.maxTokens ?? info.defaultMaxTokens ?? 0, fixedTokens, headerFingerprint,
+    reservedCompletionTokens: identity.maxTokens ?? info.defaultMaxTokens ?? 0, fixedTokens, activeTokens:priced.activeTokens, headerFingerprint,
     signature: hash([headerFingerprint, info.context?.contextWindow, identity.maxTokens ?? info.defaultMaxTokens ?? 0, engine.rollingConfig, engine.summaryRouteFingerprint()]) })
   policy.generation = generation
   const previous = engine.resolvedPolicies.get(agent)

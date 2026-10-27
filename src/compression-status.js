@@ -8,8 +8,7 @@ export const compressionCapabilities = {
   'claude-code': { supported: true, owner: 'superlcm', mode: 'takeover' },
   dsh: { supported: true, owner: 'superlcm', mode: 'takeover' },
   codex: { supported: false, owner: null, mode: 'summary-only' },
-  hermes: { supported: false, owner: null, mode: 'summary-only' },
-  pi: { supported: false, owner: null, mode: 'summary-only' },
+  pi: { supported: true, owner: 'superlcm', mode: 'takeover' },
 }
 const schema = `CREATE TABLE IF NOT EXISTS superlcm_compression_runtime(
   instance TEXT NOT NULL, session TEXT NOT NULL, harness TEXT NOT NULL,

@@ -1,3 +1,4 @@
+import {planMainFork,nativeContextUsage,forkPreparationThreshold} from './main-fork.js'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
@@ -10,22 +11,25 @@ export function summaryQueueRevision(store,session,{backend=null,env=process.env
 export function enqueueSummary(store,session,{backend=null,mode,model,origin='manual',env=process.env}={}) {
   recoverSummaryRuns(store,{env})
   if(!store.source(session)||store.isDeleted(session))throw Error('Unknown conversation')
+  if(store.metadata(session).harness==='hermes')throw Error('Unsupported harness')
   const explicit=backend!==null,chosen=store.effectiveSetting(session,env)
   mode=backend||mode||chosen.mode
-  if(!['cli','api'].includes(mode))throw Error('Background summaries are disabled for this session')
+  if(!['cli','api','main-fork'].includes(mode))throw Error('Background summaries are disabled for this session')
   if(!explicit&&!store.integrationEnabled(store.metadata(session).harness))throw Error('Integration is disconnected')
   const api=explicit&&mode==='api'?store.apiConfig(session,env):null
   if(explicit&&mode==='api'&&!api)throw Error('No saved custom API; configure one in Settings first')
-  model=api?.model||model||(mode===chosen.mode?chosen.model:null)||env.SUPERLCM_CLAUDE_MODEL||null
+  model=mode==='main-fork'?null:api?.model||model||(mode===chosen.mode?chosen.model:null)||env.SUPERLCM_CLAUDE_MODEL||null
   if(mode==='api'&&(!model||(!api&&store.apiCredential(session,env)===null))){store.setStatus(session,'summary_unconfigured');return {added:false,unconfigured:true}}
-  const work=summaryWork(store,session)
+  const fork=mode==='main-fork'?planMainFork(store,session,{force:['manual','bulk'].includes(origin),env}):null
+  const work=mode==='main-fork'?(fork?{batch_id:fork.digest}:null):summaryWork(store,session)
   if(!work)return {added:false,none:true}
   if(!['manual','bulk'].includes(origin)&&store.summaryRetry(session,work.batch_id,summarySettingsRevision(store,session,env)))return {added:false,cooldown:true}
   store.db.exec('BEGIN IMMEDIATE')
   try {
     const active=activeSummaryRun(store,session)
     if(['manual','bulk'].includes(origin)&&active?.route==='host'&&active.state==='queued')finishSummaryRun(store,active.id,{state:'stopped',reason:'manual-takeover'})
-    const result=enqueueSummaryRun(store,session,{backend:explicit?backend:null,model,origin,revision:summaryQueueRevision(store,session,{backend,env}),planned:summaryEstimate(store,session).calls})
+    const result=enqueueSummaryRun(store,session,{backend:explicit?backend:null,model,origin,revision:summaryQueueRevision(store,session,{backend,env}),planned:fork?.tree.length??summaryEstimate(store,session).calls})
+    if(fork&&result.added){store.db.exec('CREATE TABLE IF NOT EXISTS fork_summary_plans(run_id TEXT PRIMARY KEY,plan TEXT NOT NULL)');store.db.prepare('INSERT INTO fork_summary_plans VALUES(?,?)').run(result.run.id,JSON.stringify(fork))}
     store.db.exec('COMMIT');return result
   }catch(error){store.db.exec('ROLLBACK');throw error}
 }
@@ -64,8 +68,13 @@ export function drainSummaryQueue(store,{env=process.env,spawnProcess=spawn}={})
   return {started}
 }
 // Only live, settled turns call this; imports and startup replay never do.
-export function scheduleSummary(store,session,mode,model,{env=process.env,spawnProcess=spawn}={}) {
-  if(!store.integrationEnabled(store.metadata(session).harness)||!['cli','api'].includes(mode)||store.summarizing(session))return false
+export function scheduleSummary(store,session,mode,model,{env=process.env,spawnProcess=spawn,tokens=0,window=0}={}) {
+  if(mode==='main-fork'){
+    if(env.SUPERLCM_CLI_WORKER==='1'||!['claude-code','codex'].includes(store.metadata(session).harness))return false
+    const usage=nativeContextUsage(store,session,{tokens,window})
+    if(!usage.window||usage.tokens<forkPreparationThreshold(store,session,usage.window))return false
+  }
+  if(!store.integrationEnabled(store.metadata(session).harness)||!['cli','api','main-fork'].includes(mode)||store.summarizing(session))return false
   if(mode==='cli'&&store.hostWriter(session))return false
   if(mode==='api'&&(!(model||env.SUPERLCM_CLAUDE_MODEL)||store.apiCredential(session,env)===null)) {
     store.setStatus(session,'summary_unconfigured');process.stderr.write('SuperLcm: api mode needs a model ID and a configured scoped API key\n');return false

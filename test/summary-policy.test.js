@@ -82,10 +82,10 @@ test('complete overlength output is marked as reduced navigation; incomplete out
   assert.throws(()=>checkedSummary('plausible partial',{finishReason:{kind:'max-tokens'}}),/incomplete/)
 }))
 
-test('Hermes SQLite mirror retains JSON-string calls, named tool outcomes and structured-content sentinel',()=>{
-  const calls=JSON.stringify([{id:'hermes-run',function:{name:'shell',arguments:'{\"command\":\"exit 1\"}'}}])
-  assert.match(summarySource(line({role:'assistant',content:null,tool_calls:calls})),/tool call shell; id=hermes-run/)
-  assert.match(summarySource(line({role:'tool',tool_name:'shell',tool_call_id:'hermes-run',content:'exit code 1'})),/tool result shell; id=hermes-run/)
+test('Generic JSONL retains JSON-string calls, named tool outcomes and structured-content sentinel',()=>{
+  const calls=JSON.stringify([{id:'call-run',function:{name:'shell',arguments:'{\"command\":\"exit 1\"}'}}])
+  assert.match(summarySource(line({role:'assistant',content:null,tool_calls:calls})),/tool call shell; id=call-run/)
+  assert.match(summarySource(line({role:'tool',tool_name:'shell',tool_call_id:'call-run',content:'exit code 1'})),/tool result shell; id=call-run/)
   assert.match(summarySource(line({role:'user',content:'\0json:'+JSON.stringify([{type:'text',text:'生产部署不批准。'}])})),/生产部署不批准/)
 })
 

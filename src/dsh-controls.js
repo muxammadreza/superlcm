@@ -1,3 +1,4 @@
+import {defaultRecentKeep, recentKeep} from './recent-retention.js'
 import { existsSync,readFileSync,mkdirSync,writeFileSync,renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHash,randomUUID } from 'node:crypto'
@@ -24,10 +25,12 @@ export function inheritedControls(store,configuration) {
 }
 export function controlDocument(store,plan) {
   const inherited=inheritedControls(store,plan._next.configuration)
-  return {format:1,revision:randomUUID(),config:controlsConfig({...inherited,auto:false,budgetMode:'ratio',foldBatchTokens:inherited.budgetMode==='ratio'?inherited.foldBatchTokens:(store.tuning().target_tokens||20000),...plan._next.choice?{summarizationProvider:plan.provider,summarizationModel:plan.model,summaryAdapter:modelSpec(plan)}:{}})}
+  return {format:1,revision:randomUUID(),config:controlsConfig({...inherited,auto:false,budgetMode:'ratio',keepRecentTokens:inherited.keepRecentTokens??defaultRecentKeep,foldBatchTokens:store.tuning().target_tokens||Math.floor((store.tuning().target_chars||80000)/4),condensedMinFanout:store.tuning().fanout,...plan._next.choice?{summarizationProvider:plan.provider,summarizationModel:plan.model,summaryAdapter:modelSpec(plan)}:{}})}
 }
 const digest=value=>createHash('sha256').update(value).digest('hex')
-const safeError=error=>new Error(/^(?:压缩(?:设置|开关|参数|比例|接管)|强制压缩|原文保留|最小压缩|请先|请选择|当前接入|配置已变化|保存失败且存在并发修改|检测到冲突)/.test(error.message)?error.message:'DSH 压缩配置读取或保存失败，请检查宿主日志')
+const summarySelection=store=>store.harnessSetting('dsh')||store.globalSetting()||{mode:'main-fork'}
+const summaryRevision=store=>digest(JSON.stringify([summarySelection(store),store.integrationRevision('dsh')]))
+const safeError=error=>new Error(/^(?:压缩(?:设置|开关|参数|比例|接管)|强制压缩|(?:最近)?原文保留|最小压缩|请先|请选择|当前接入|配置已变化|保存失败且存在并发修改|检测到冲突)/.test(error.message)?error.message:'DSH 压缩配置读取或保存失败，请检查宿主日志')
 export async function dshCompressionSettings(store,options={}) {
   try{return await readSettings(store,options)}catch(error){throw safeError(error)}
 }
@@ -42,13 +45,14 @@ async function readSettings(store,options) {
   try {installedVersion=JSON.parse(readFileSync(join(dshHome(options.env),'node_modules/superlcm/package.json'),'utf8')).version}catch{}
   const runtimes=compressionSnapshot(store).runtimes,live=runtimes.filter(r=>r.live&&r.kind==='engine')
   const acknowledged=!!saved&&live.length>0&&live.every(r=>r.settings_revision===saved.revision&&r.enabled===base.auto&&r.route_ready&&r.version===installedVersion&&r.version===packageInfo.version&&runtimes.some(a=>a.live&&a.kind==='archive'&&a.pid===r.pid&&a.profile===r.profile&&a.version===r.version))
-  const revision=digest(JSON.stringify([raw,plan.revision]))
-  return {expected_version:packageInfo.version,installed_version:installedVersion,configured:plan.existing||archiveOnly,archive_only:archiveOnly,controls_installed:installed,revision,settings_revision:saved?.revision||null,
-    compressionRatio:base.switchRatio??0.8,enabled:archiveOnly?false:base.auto??false,budgetMode:base.budgetMode||'ratio',prepareRatio:base.prepareRatio??0.7,switchRatio:base.switchRatio??0.8,emergencyRatio:base.emergencyRatio??0.9,provider_ref:base.summaryAdapter?.ref||plan.provider_ref,provider:base.summarizationProvider||plan.provider,model:base.summarizationModel||plan.model,...fields,
+  const central=summarySelection(store),summary_revision=summaryRevision(store),tuning_revision=digest(JSON.stringify(store.tuning()))
+  const revision=digest(JSON.stringify([raw,plan.revision,summary_revision,store.tuning()]))
+  return {expected_version:packageInfo.version,installed_version:installedVersion,configured:plan.existing||archiveOnly,archive_only:archiveOnly,controls_installed:installed,revision,summary_revision,settings_revision:saved?.revision||null,
+    keep:base.keepRecentTokens??(base.budgetMode==='tokens'?base.minRetainTokens:undefined)??defaultRecentKeep,forkModelOverride:base.forkModelOverride===true,summaryMode:central.mode==='main-fork'?'main-fork':central.mode==='api'?'api':base.summaryMode||'main-fork',compressionRatio:base.switchRatio??0.8,enabled:archiveOnly?false:base.auto??false,budgetMode:base.budgetMode||'ratio',prepareRatio:base.prepareRatio??0.7,switchRatio:base.switchRatio??0.8,emergencyRatio:base.emergencyRatio??0.9,provider_ref:base.summaryAdapter?.ref||plan.provider_ref,provider:base.summarizationProvider||plan.provider,model:base.summarizationModel||plan.model,...fields,
     status:!installed?'needs-update':acknowledged?'applied':live.length?'pending':'awaiting-runtime',catalog:plan.catalog,
-    _plan:plan,_raw:raw}
+    _plan:plan,_raw:raw,_tuning_revision:tuning_revision}
 }
-export function publicCompressionSettings({_plan,_raw,...value}){return value}
+export function publicCompressionSettings({_plan,_raw,_tuning_revision,...value}){return value}
 const saving=new Set()
 export async function saveDshCompression(store,input,options={}) {
   if(saving.has(store.dir))throw Error('压缩设置正在保存，请稍后重试')
@@ -64,11 +68,12 @@ async function saveSettings(store,input,options) {
   const provider=current._plan._next.configuration
   const {dshSetupPreview}=await import('./dsh-setup.js')
   const plan=await dshSetupPreview(store,{...options,provider_ref:input.provider_ref,model:input.model})
-  if(input.enabled&&(!plan.can_apply||!plan.route_ready))throw Error(plan.blocker||'请先选择压缩模型')
+  const forkMode=(store.harnessSetting('dsh')||store.globalSetting())?.mode==='main-fork'||(!store.harnessSetting('dsh')&&!store.globalSetting())
+  if(input.enabled&&(!plan.can_apply||!plan.route_ready&&(!forkMode||input.forkModelOverride===true)))throw Error(plan.blocker||'请先选择压缩模型')
   const snapshot=p=>JSON.stringify([p._next.raw,p._next.configuration.profiles.map(x=>[x.name,x.manifest,x.patch])])
   if(snapshot(plan)!==snapshot(current._plan))throw Error('配置已变化，请重新读取后保存')
   const before=inheritedControls(store,provider)
-  const config=controlsConfig({...before,...Object.fromEntries([...Object.keys(controlFields),...Object.keys(RATIO_DEFAULTS)].filter(k=>input[k]!==undefined).map(k=>[k,input[k]])),...(input.compressionRatio!==undefined?automaticRatios(input.compressionRatio):{}),auto:input.enabled,budgetMode:input.compressionRatio!==undefined?'ratio':input.budgetMode??before.budgetMode??'ratio',...plan._next.choice?{summarizationProvider:plan.provider,summarizationModel:plan.model,summaryAdapter:modelSpec(plan)}:{}})
+  const config=controlsConfig({...before,keepRecentTokens:recentKeep(input.keep===undefined?current.keep:input.keep),summaryMode:forkMode?'main-fork':'api',forkModelOverride:input.forkModelOverride??before.forkModelOverride??false,...Object.fromEntries([...Object.keys(controlFields),...Object.keys(RATIO_DEFAULTS)].filter(k=>input[k]!==undefined).map(k=>[k,input[k]])),...(input.compressionRatio!==undefined?automaticRatios(input.compressionRatio):{}),foldBatchTokens:store.tuning().target_tokens||Math.floor((store.tuning().target_chars||80000)/4),condensedMinFanout:store.tuning().fanout,auto:input.enabled,budgetMode:input.compressionRatio!==undefined?'ratio':input.budgetMode??before.budgetMode??'ratio',...plan._next.choice?{summarizationProvider:plan.provider,summarizationModel:plan.model,summaryAdapter:modelSpec(plan)}:{}})
   if(rawControls(store)!==current._raw)throw Error('压缩设置已变化，请重新读取后保存')
   const backup=join(store.dir,'config-backups','dsh-controls-'+randomUUID());mkdirSync(backup,{recursive:true,mode:0o700})
   if(current._raw!==null)writeFileSync(join(backup,'settings.before.json'),current._raw,{mode:0o600})
@@ -82,7 +87,7 @@ async function saveSettings(store,input,options) {
   let transaction=false,wrote=false
   try {
     store.db.exec('BEGIN IMMEDIATE');transaction=true
-    if(rawControls(store)!==current._raw)throw Error('压缩设置已变化，请重新读取后保存')
+    if(rawControls(store)!==current._raw||summaryRevision(store)!==current.summary_revision||digest(JSON.stringify(store.tuning()))!==current._tuning_revision)throw Error('压缩设置已变化，请重新读取后保存')
     writeFileSync(temp,written,{flag:'wx',mode:0o600});renameSync(temp,file);wrote=true;store.db.exec('COMMIT')
   }catch(error){
     if(transaction)store.db.exec('ROLLBACK')

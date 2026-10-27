@@ -14,7 +14,7 @@ export function paths(env=process.env) {
   return {home,codex:resolve(env.CODEX_HOME || join(home,'.codex')),claude:resolve(env.CLAUDE_CONFIG_DIR || join(home,'.claude'))}
 }
 export function findCli(name,env=process.env) {
-  const override=name==='codex'?env.SUPERLCM_CODEX_CLI_BIN:name==='claude'?env.SUPERLCM_CLAUDE_CLI_BIN:name==='hermes'?env.SUPERLCM_HERMES_BIN:name==='pi'?env.SUPERLCM_PI_BIN:name==='dsh'?env.SUPERLCM_DSH_BIN:null
+  const override=name==='codex'?env.SUPERLCM_CODEX_CLI_BIN:name==='claude'?env.SUPERLCM_CLAUDE_CLI_BIN:name==='pi'?env.SUPERLCM_PI_BIN:name==='dsh'?env.SUPERLCM_DSH_BIN:null
   const candidate=override||name
   const home=paths(env).home
   const dirs=(env.PATH||'').split(delimiter).filter(Boolean).concat([join(home,'.local','bin'),join(home,'.npm-global','bin'),'/opt/homebrew/bin','/usr/local/bin',...(env.APPDATA?[join(env.APPDATA,'npm')]:[])])
@@ -32,8 +32,8 @@ export function claudePluginEnabled(env=process.env){
 export const commandOptions = env => ({env,timeout:12000,maxBuffer:2*1024*1024,windowsHide:true})
 
 // Node that the connected tools should launch SuperLcm with. Prefer one that no AI tool ships inside its
-// own folder (Hermes bundles one under ~/.hermes/node): a tool update can replace or remove its copy.
-const TOOL_DIRS = [['.hermes', 'Hermes'], ['.codex', 'Codex'], ['.claude', 'Claude Code'], ['.pi', 'Pi']]
+// own folder: a tool update can replace or remove its copy.
+const TOOL_DIRS = [['.hermes', 'Other tool'], ['.codex', 'Codex'], ['.claude', 'Claude Code'], ['.pi', 'Pi']]
 const recentNode = new Map()
 function nodeRecentEnough(bin) {
   if (!recentNode.has(bin)) {

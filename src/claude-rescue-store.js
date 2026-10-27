@@ -39,6 +39,7 @@ function publish(store,session,row,cancelId) {
   return plan
 }
 export function prepareClaudeRescue(store,session,input) {
+  if(store.effectiveSetting(session).mode==='main-fork')return {use:false,reason:'Background branch mode only installs already prepared summaries'}
   initialize(store)
   if(rescueCancelled(store.dir,session,input.cancel_id))return {use:false}
   const src=store.source(session)

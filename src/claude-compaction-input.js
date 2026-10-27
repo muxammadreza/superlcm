@@ -2,18 +2,21 @@
 // Verify Claude's isCompactSummary flag in the exact archived record instead.
 import { coveredThrough } from './compaction.js'
 import {claudeCheckpoints} from './claude-checkpoints.js'
+import {summaryToolPairing} from './summary-source.js'
+import {isRequestCopy} from './claude-records.js'
 const prefix = 'This session is being continued from a previous conversation'
 const textOf = record => {
   const content = record?.message?.content??record?.content
   return typeof content === 'string' ? content : Array.isArray(content) ? content.filter(p => p?.type === 'text').map(p => p.text).join('\n') : ''
 }
 export function verifiedCompactionInput(store, session, messages) {
-  const nativeTexts = [], promptTexts = [], packets=[], promptOrigins=new Map()
+  const nativeTexts = [], promptTexts = [], packets=[], promptOrigins=new Map(),turnOrigins=new Map()
   const through = coveredThrough([...store.nodeRows(session, 0),...claudeCheckpoints(store,session)]), all=store.eventRows(session)
   const opening=messages[0]?.text?.trim()||'',packetCandidate=opening.startsWith('<superlcm-context ')
   const events=all.map(event=>{
     if(!event.preview.startsWith('user: ') && !(packetCandidate&&!event.preview))return event
     let record;try{record=JSON.parse(store.exact(session,event.ordinal))}catch{return {...event,humanPrompt:false}}
+    if(isRequestCopy(record))return {...event,humanPrompt:false}
     if(record?.type!=='user'&&record?.role!=='user')return event
     const text=textOf(record),blocks=record.message?.content??record.content,toolResults=Array.isArray(blocks)&&blocks.some(b=>b.type==='tool_result')
     const human=!record.isMeta&&!record.isCompactSummary&&!toolResults&&!!text.trim()
@@ -22,8 +25,10 @@ export function verifiedCompactionInput(store, session, messages) {
     const knownOrigin=systemOrigin||origin==='human'
     const humanPrompt=human&&!systemOrigin
     const value={...event,text,toolResults,humanPrompt,uuid:record.uuid,...(record.isCompactSummary===true?{continuation:true}:{})}
+    const endsTurn=summaryToolPairing(JSON.stringify(record)).endsTurn===true
     for(const key of new Set([text.trim(),text.slice(0,2000).trim()]))if(key){
       const flags=promptOrigins.get(key)||[];flags.push(knownOrigin?humanPrompt:null);promptOrigins.set(key,flags)
+      const turns=turnOrigins.get(key)||[];turns.push(endsTurn);turnOrigins.set(key,turns)
     }
     if(text.trimStart().startsWith('<superlcm-context ')&&!event.preview){packets.push({text:text.trim(),ordinal:event.ordinal});return {...value,humanPrompt:false}}
     if(!event.preview.startsWith(`user: ${prefix}`))return value
@@ -43,6 +48,11 @@ export function verifiedCompactionInput(store, session, messages) {
     // Ambiguous human/system matches retain human protection. Untagged older
     // records keep the existing conservative prompt classification.
     const prompt=flags.length&&!flags.includes(null)?(flags.some(Boolean)?'human':'system'):undefined
-    return { ...message, nativeSummary, packetSummary:packet, ...(prompt?{prompt}:{}) }
+    // Every matching archived origin must prove the boundary. Neither caller
+    // flags nor text shared by a human and a notification can authorize a reset.
+    const turns=message.role==='user'&&text&&!message.toolResults&&!message.toolResultIds?.length&&!message.toolUses?.length
+      ? [...new Set([text,text.slice(0,2000).trim()].flatMap(key=>turnOrigins.get(key)||[]))] : []
+    const verifiedTurnBoundary=turns.length>0&&turns.every(Boolean)
+    return { ...message, nativeSummary, packetSummary:packet, verifiedTurnBoundary, ...(prompt?{prompt}:{}) }
   }) }
 }

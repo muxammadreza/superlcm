@@ -2,33 +2,32 @@
 
 <h1 align="center">SuperLcm</h1>
 
-<p align="center"><b>Five harnesses. One local conversation archive.</b><br>Keep every original. Recall any detail. Continue in another harness.</p>
+<p align="center"><b>Four harnesses. One local conversation archive.</b><br>Keep every original. Recall any detail. Continue in another harness.</p>
 
 <p align="center"><b>English</b> · <a href="README.zh-CN.md">中文</a></p>
 
-SuperLcm gives **Claude Code, Codex, Hermes, Pi and dsh harness** a shared conversation archive on your own computer. Original records stay available word for word; layered summaries help you find what matters. Switch tools and continue the same task with one short handoff, then read any earlier detail directly from its source.
+SuperLcm gives **Claude Code, Codex, Pi and dsh harness** a shared conversation archive on your own computer. Original records stay available word for word; layered summaries help you find what matters. Switch tools and continue the same task with one short handoff, then read any earlier detail directly from its source.
 
-From 0.5.11, background writers and Claude/DSH compaction share rules for chronology, decisions and rationale, authorization scope, failed tools and source recall. Existing summaries are retained, not automatically regenerated. See [summary semantics and validation limits](docs/SUMMARY-SEMANTICS-0.5.11.md).
+This README describes the current `main` branch. The background-branch changes have not yet been published as an npm package; [run from a checkout](#quick-start-from-a-checkout) to try them. Earlier changes are in the [changelog](CHANGELOG.md).
 
-DSH pressure recovery is fixed in 0.5.28; see [behavior and validation](docs/DSH-PRESSURE-RECOVERY-0.5.28.md). Summary workers, retry progress and error diagnostics were revised in 0.5.27. See [changes and verification limits](docs/SUMMARY-JOBS-0.5.27.md).
-
-0.5.29 adds bounded summary attempts, durable commit recovery and one final current-model rescue when all summary routes exhaust quota. See [behavior and limits](docs/FAULT-RESILIENCE.md).
-
-## Five harnesses, one archive
+## Four harnesses, one archive
 
 | Harness | Archive, summaries and continuation | Compaction integration | How to connect |
 |---|---|---|---|
 | Claude Code | Supported | Native compaction by default; optional SuperLcm takeover | Claude plugin or console |
 | Codex | Supported | Native host compaction | Console: MCP tools and capture hooks |
-| Hermes | Supported | Native host compaction | Console: Hermes configuration and capture hooks |
-| Pi | Supported | Native host compaction | Console: auto-discovered extension |
-| dsh harness | Supported | Native compaction by default; optional SuperLcm takeover | Console: connect globally and choose a summary API |
+| Pi | Supported | Native by default; optional SuperLcm takeover | Console: auto-discovered extension |
+| dsh harness | Supported | Native compaction by default; optional SuperLcm takeover | Console: connect globally; main-model branches by default |
 
-All five connections default to archiving, background summaries and recall, with compaction owned by the host. Claude Code and DSH takeover are separate optional settings, off by default and reset to off when their connections are installed or updated. The default DSH component mounts only the archive and console-settings bridge.
+All four connections use **main-model background branches** by default. The branch inherits the active model and account and returns a complete tree in one response: granular source summaries, parent summaries and a continuation root. Explicit independent API configurations and “off” remain unchanged. In-conversation summary-writing tools have been retired.
 
-The console navigation is **Conversations → Connect → Compaction → Settings**. Choose a summary model on each connection card; adjust granularity in Settings. Source segments default to about 20,000 estimated tokens, with four adjacent summaries per merge. DSH’s SuperLcm plugin shows only **Console settings**, linking directly to the DSH compaction tab. Budget estimation follows Lossless Claw’s language-aware approach and is separate from provider billing; legacy character settings remain valid. See the [design comparison](docs/LOSSLESSCLAW-SUMMARY-REVIEW-20261006.md).
+The console navigation is **Conversations → Tools → Compression → Settings**. Each tool card selects the summary method; the Compression page configures Claude Code, Pi and DSH takeover. A replacement ratio always starts preparing 10 percentage points earlier: 50% replacement means 40% preparation. Default: 80%/70%. Enable “Allow another model” to choose from that harness’s native model catalog; the chat model stays unchanged. Around 70% of a known context budget, background preparation starts. Pi and DSH can install the prepared root around 80%, retaining recent and newly appended originals. Codex retains native compaction. Claude uses a percentage of its native capacity; legacy absolute thresholds remain compatible until a new ratio is saved. Unknown context capacity never triggers a speculative automatic branch.
 
-Start with the [installation package](docs/RELEASE.md), run `superlcm web`, and choose your tool under **Connect**. Claude Code users can also [install the Claude plugin](#install-as-a-claude-plugin) and open `/superlcm:console`. For dsh harness, connect once globally and reload dsh harness; see [dsh harness setup](docs/DSH.md).
+Claude Code, Pi and DSH share the same Compression controls: takeover, replacement ratio, background model and recent originals (20K / 40K / 80K or custom 5K–200K). Retention targets shrink to half the current dialogue when necessary; complete turns and tool groups stay intact. Summary granularity and tree fanout are configured once under Settings, including for the live DSH engine. Changes invalidate pending preparations before reuse. Toggles and presets save immediately; custom values save beside their inputs. Model choices have their own save action.
+
+Source granularity defaults to about 20,000 estimated tokens, with four adjacent children per parent. Every level is requested in the same response and atomically saved after source and completeness checks. Cache hits are measured from provider usage, never guaranteed. See [architecture and verification](docs/MAIN-FORK.md).
+
+Start with the [installation package](docs/RELEASE.md), run `superlcm web`, and choose your tool under **Tools**. Claude Code users can also [install the Claude plugin](#install-as-a-claude-plugin) and open `/superlcm:console`. The DSH plugin is bundled with SuperLcm: connect once globally and reload dsh harness to see SuperLcm under Plugins. No separate dsh-superlcm installation is needed; see [dsh harness setup](docs/DSH.md).
 
 ## Move a whole conversation, summaries and all, into another tool
 
@@ -37,40 +36,34 @@ Start with the [installation package](docs/RELEASE.md), run `superlcm web`, and 
 - **Pick up exactly where you stopped.** Out of quota, rate-limited, or want a second model's opinion: say `Continue #6e94e via SuperLcm` in the other tool and the task continues.
 - **No retelling, no giant paste.** `lcm_continue` hands over the layered outline and the latest messages, so the new agent starts with a small, focused context instead of the whole transcript.
 - **Every detail still one call away.** The whole conversation stays in the archive. When an early decision matters, the new agent reads that record word for word with `lcm_read`.
-- **Any direction, back and forth.** Claude Code, Codex, Hermes, Pi and dsh harness all read and write the same archive, and the continued work is archived too, so the task can be handed back the same way.
+- **Any direction, back and forth.** Claude Code, Codex, Pi and dsh harness all read and write the same archive, and the continued work is archived too, so the task can be handed back the same way.
+
+## One background branch, one complete tree
+
+For Pi and dsh with the default 80% takeover setting:
+
+```mermaid
+flowchart LR
+  A["Keep archiving originals"] --> B["Around 70%: fork in the background"]
+  B --> C["One response: source blocks, parents and root"]
+  C --> D["Validate and save the complete tree"]
+  D --> E["Around 80%: install the prepared root"]
+  E --> F["Keep recent and newly appended originals"]
+```
+
+Before the normal preparation point, SuperLcm archives originals. At preparation, it fixes a safe older range and plans the whole tree. One model request returns all source summaries and their parent summaries together. **A 20K-token block describes source granularity; it is not a separate model call.** The main conversation continues during preparation, and replacement reads the saved result.
+
+“One response” means one successful preparation task. A later task can prepare a newly eligible range; failed or invalidated work can be retried. Capacity protection can start preparation earlier. With takeover off, summaries stay available for archive lookup and the host manages its own context. Explicit independent API mode keeps its separate background batch writer. Cache usage follows provider receipts.
 
 ## Optional compaction takeover for Claude Code
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/takeover-en-dark.gif"><img src="docs/images/takeover-en-light.gif" alt="Animation: two conversations grow to Claude Code's 300K compaction threshold. On the left Claude Code stops for 46 seconds to summarize and older originals leave the active context. On the right Haiku has written L0 and L1 summaries in the background; at the threshold SuperLcm swaps the older part for them in 0.07 seconds, keeps the newest 40K word for word, and the conversation goes on."></picture>
+Claude Code takeover uses its configured replacement threshold, 300K tokens by default, with preparation scheduled before that threshold. The latest 40K tokens stay verbatim by default, and complete originals remain available. Branch mode only reads prepared summaries at replacement; missing safe coverage or boundaries return control to native Claude compaction.
 
-Claude Code's own compaction stops the conversation at the threshold, asks the model to squeeze everything into one summary, and removes older originals from the active context. With the SuperLcm plugin installed and takeover explicitly enabled, prepared layered summaries can replace that older context:
-
-- **Assembled in the background, ahead of time.** After each turn the plugin writes the waiting summary pieces while you keep working, so by the time the context fills up the replacement is already there.
-- **One swap when the summaries are ready.** At the threshold (300K tokens by default; 200K, 500K, 800K or a custom size up to 950K) SuperLcm swaps the older part for the fewest layered summaries that cover it, in one step without another summary-model call. If source coverage or boundaries do not validate, Claude Code handles compaction.
-- **The work in hand keeps its detail.** The newest 40K tokens (adjustable: 20K, 40K, 80K or a custom size) stay word for word. Only older parts become summaries, with exact originals available for later lookup.
-- **Complete originals.** Only the agent's view gets shorter. Every original stays in the archive, numbered, and the agent quotes it back with `lcm_read` when a detail matters.
-- **Summaries by Haiku, inside the conversation.** With "Own tool, in the background" and model `haiku` on the Claude Code card, the plugin calls Haiku through the conversation's own login. No API key, no second Claude Code session, and the expensive main model is not spent on bookkeeping.
-- **One final rescue for missing coverage.** With takeover enabled, if bounded catch-up still cannot provide enough safe coverage or space, the plugin asks the current conversation model once, reusing verified summaries and protecting the exact current request. Completed output survives transient save failures. Failed or ambiguous rescues return to native compaction; subagents remain native. See [behavior and limits](docs/CLAUDE-MAIN-RESCUE.md).
-- **Off by default.** Turning takeover off restores your previous compaction setting. Background archiving and summaries can still run separately.
-
-An earlier example from a conversation of about 12,000 records: the older part became 3 summaries of about 8,000 characters (a few thousand tokens), the newest stretch stayed verbatim, and a 300K context came back at roughly 70K, most of it Claude Code's own system prompt and tool definitions.
-
-**What the Claude plugin brings**
-
-| Part | What it does |
-|---|---|
-| Capture hooks | Save every turn to the archive as it happens |
-| Lookup tools | `lcm_find`, `lcm_outline`, `lcm_read`, `lcm_continue` for the agent |
-| Plugin module | Compaction takeover and in-conversation summaries (Claude Code 2.1.286+) |
-| `/superlcm:console` | Opens the local console: settings, conversations, connecting other tools |
-
-The module runs in the terminal `claude` and in the Claude desktop app's Code tab from Claude Code 2.1.286. Older versions still get capture and lookup; after updating, takeover can be explicitly enabled under Compaction → Claude Code. The console shows what this computer supports.
+Takeover is off by default. Enable it under **Tools → Optional context compaction → Claude Code**. The Claude plugin provides capture hooks, four recall tools, the compaction module and `/superlcm:console`. The module requires Claude Code 2.1.286+; the console reports local capabilities.
 
 ## Shorter context, preserved originals
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/compare-en-dark.gif"><img src="docs/images/compare-en-light.gif" alt="Animation: ordinary compaction squeezes 18 messages into ever shorter summaries and loses the port number; SuperLcm files every message, builds L1 and L2 summary cards, and reads record #005 back word for word."></picture>
-
-Both sides start with the same 18 messages and a context window that holds six. Ordinary compaction squeezes everything into one shorter summary each time, so earlier details depend on what that summary kept. SuperLcm saves each group of messages in full, writes a summary card that points back to them, and binds the cards into a higher level. Asked many turns later which port the console uses, the agent follows the path down with `lcm_find`, `lcm_outline` and `lcm_read` and quotes the original.
+A summary is a guide to the archive. When an old deployment port or decision matters, the agent can search with `lcm_find`, inspect the hierarchy with `lcm_outline`, and read the exact original with `lcm_read`. Losing a detail from a summary does not delete that detail from the archive.
 
 ## How it works
 
@@ -78,7 +71,7 @@ Both sides start with the same 18 messages and a context window that holds six. 
 
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/fig1-en-dark.png"><img src="docs/images/fig1-en-light.png" alt="Example records as they land in the archive, numbered #1841 to #1845" width="560"></picture>
 
-**Summaries in layers, each one pointing at its pages.** A run of messages (about 20,000 estimated source tokens by default, adjustable) becomes a summary; four adjacent summaries are merged into a higher layer by default. The top reads like a table of contents for the whole conversation, and every entry carries the record numbers it came from. Summaries locate earlier history; exact details and consequential decisions can be checked against numbered source records.
+**Summaries in layers, each one pointing at its pages.** A run of messages (about 20,000 estimated source tokens by default, adjustable) becomes a summary; the plugin plans parents with four children by default. All source summaries and parents arrive in the same background response. The top reads like a table of contents for the whole conversation, and every entry carries the record numbers it came from. Summaries locate earlier history; exact details and consequential decisions can be checked against numbered source records.
 
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/fig2-en-dark.png"><img src="docs/images/fig2-en-light.png" alt="Summary tree: one L2 volume over three L1 chapters over the original records" width="560"></picture>
 
@@ -88,13 +81,9 @@ Both sides start with the same 18 messages and a context window that holds six. 
 
 ## Who writes the summaries
 
-**By default, dsh harness owns compaction and SuperLcm writes independent background summaries.** Select a saved API on its connection card. Independent Claude and DSH takeover settings live on the dedicated Compaction page, off by default. The DSH plugin shows only a link to the console. Summaries enter the archive without replacing the active context. Migration and disconnect verify native compaction and preserve configured chat models.
+The default is **main-model background branch**, using the current conversation model and account. Summary preparation and compaction takeover have independent controls. Claude Code, Codex, Pi and dsh all support background summaries; Claude Code, Pi and dsh additionally offer optional takeover. An independent API model remains an advanced choice, and summaries can be turned off.
 
-Optional DSH takeover uses the bound request’s input capacity after output reservation: prepare ordinary ~20K source chunks, then freeze and publish once ready at the selected compaction percentage (80% by default). The compression page offers presets and a custom percentage, using the same layout as Claude Code. Preparation and safety waiting are scheduled automatically. Complete recent user turns and tool groups remain verbatim. See [DSH ratio compaction](docs/DSH-RATIO-COMPACTION.md) for safeguards.
-
-Import existing DSH sessions under Connect → dsh harness → Import past conversations. Complete tool records are retained, no model is called, and repeated imports are deduplicated. Manage connection → Disconnect stops automatic capture and summaries, removes recall registration and keeps stored originals and summaries. Reload existing sessions afterwards.
-
-Chosen per tool in the console: **the agent itself** (optional), **the tool's own CLI** (the default for supported tools) in a short background run with the account and model you already use (for Claude Code 2.1.286+ with the plugin, the model is called from inside the conversation instead; Haiku is a good choice), **your own API** (any Anthropic or OpenAI-compatible endpoint, including a gateway on your own computer), or **off** (everything is still saved and searchable). DSH background summaries use a saved custom API; without one, originals are archived until a summary API is selected.
+Use the tool card to choose the writer. Open **Compression** to configure ratios and optional native background models. Importing historical sessions calls no model. Disconnecting preserves stored originals and summaries; reload existing sessions afterwards.
 
 ## Compaction vs. an archive
 
@@ -114,7 +103,7 @@ In Claude Code:
     /plugin marketplace add yu381792/superlcm
     /plugin install superlcm@superlcm
 
-The plugin brings everything listed above for Claude Code; to use the compaction takeover, open the console and turn it on under Compaction. `/superlcm:console` opens the console, where Codex, Hermes, Pi and dsh harness are connected to the same archive. It runs wherever Claude can start local programs (Claude Code, and Cowork on your own computer), not in claude.ai web or mobile chat. Needs Node.js 22.16 or newer on PATH; an older `node` hands over to a newer one if one is installed.
+The plugin brings everything listed above for Claude Code; to use the compaction takeover, open the console and turn it on under Tools → Optional context compaction. `/superlcm:console` opens the console, where Codex, Pi and dsh harness are connected to the same archive. It runs wherever Claude can start local programs (Claude Code, and Cowork on your own computer), not in claude.ai web or mobile chat. Needs Node.js 22.16 or newer on PATH; an older `node` hands over to a newer one if one is installed.
 
 Plugin updates replace the plugin folder, so tools connected from the plugin's console are pointed at a fixed entry file in the SuperLcm folder (`~/.superlcm-claude/superlcm.js`) that follows updates. If Claude Code was connected from the console before, the older hooks in Claude's settings stay quiet once the plugin is enabled, and the console's Claude card offers to remove them and the older `superlcm` MCP entry (backed up first). The same card installs and updates the plugin.
 
@@ -124,14 +113,13 @@ Plugin updates replace the plugin folder, so tools connected from the plugin's c
 
 Open `http://127.0.0.1:8791/` (no login; it only listens on this computer), then:
 
-1. **接入 (Connect)** — pick Claude Code, Codex, Hermes, Pi or dsh harness and confirm. SuperLcm registers its MCP server and capture hooks (for Pi, one extension file), backs up the config first, and verifies it loads. For dsh harness, the summary-only integration is global and needs no compression model. Reload dsh harness after installation. Codex and Hermes want new hooks approved once; a checkbox in the dialog (on by default) does that for you through each tool's own mechanism, so no terminal step is needed.
-2. **对话 (Conversations)** — browse, search and read every stored conversation and its summary tree. Click **换个工具继续** to get the one-line handoff for another tool.
-3. **设置 (Settings)** — choose who writes summaries: the AI inside the conversation (optional), a separate background run of the conversation's own tool (Claude Code, Codex, Hermes or Pi, with whatever account and model you set up there, pickable per tool), or a custom API that SuperLcm calls directly (any Anthropic or OpenAI-compatible endpoint). Tune segment size and merge width.
-4. **压缩 (Compaction)** — configure optional Claude Code and DSH takeover independently, off by default.
+1. **工具 (Tools)** — connect a harness and choose the summary method. The default branch follows the current model and account. Use **Compression** to configure Claude Code, Pi or dsh takeover, preparation ratios and optional native background models. Reload existing host sessions after changing integration code.
+2. **对话 (Conversations)** — browse, search and read stored conversations and their summary trees. Use **换个工具继续** to hand a task to another tool.
+3. **设置 (Settings)** — tune source granularity and parent width, and manage advanced API models.
 
-Terminal equivalents: `superlcm setup dsh --apply`, `node src/cli.js setup codex --apply`, `node src/cli.js setup claude-code --apply`, `node src/cli.js summarize <conversation> --backend cli`.
+Terminal equivalents: `superlcm setup dsh --apply`, `node src/cli.js setup codex --apply`, `node src/cli.js setup pi --apply`, `node src/cli.js summarize <conversation> --backend main-fork` (Claude Code and Codex native branches).
 
-Hermes keeps its transcripts in a SQLite database and rewrites them on compression, so SuperLcm keeps its own append-only copy of every message row and joins a compression chain into one conversation. Pi session files are append-only and are indexed byte for byte, all branches included.
+Pi session files are append-only and are indexed byte for byte, all branches included.
 
 ## MCP tools
 
@@ -141,9 +129,8 @@ Hermes keeps its transcripts in a SQLite database and rewrites them on compressi
 | `lcm_find` | Find conversations by `#code`, name or ID, and search summaries and originals |
 | `lcm_outline` | Expand the summary tree one level at a time |
 | `lcm_read` | Read exact original records by number |
-| `lcm_summary_task` / `lcm_summary_submit` | In-conversation summary mode only: claim a segment, submit its summary (verified against the originals) |
 
-Every tool is marked with MCP annotations: the four lookups are read-only, the two summary tools write only SuperLcm's own summaries, and none is destructive or reaches outside this computer, so hosts such as Codex run them without asking each time.
+All four MCP tools are read-only. Summary generation and persistence belong to the background integration, separate from recall.
 
 ## More
 
@@ -153,11 +140,11 @@ Every tool is marked with MCP annotations: the four lookups are read-only, the t
 - [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Contributions](CLA.md) · [Security](SECURITY.md)
 - License: [MIT](LICENSE). Copyright 2026 ygc381792 and contributors. Free to use, modify and redistribute, including commercially; keep the copyright notice.
 
-Claude, Claude Code, Codex, Hermes and Pi names and logos belong to their respective owners and are used only to identify compatible tools. SuperLcm is an independent project and is not affiliated with or endorsed by them.
+Claude, Claude Code, Codex and Pi names and logos belong to their respective owners and are used only to identify compatible tools. SuperLcm is an independent project and is not affiliated with or endorsed by them.
 
 摘要语言和指令隔离修复见 [新版说明](docs/SUMMARY-QUALITY-0.5.24.md)。
 
-完整版与 DSH 独立版的关系、修复同步及验证范围见 [修复同步说明](docs/REPAIR-SYNC-0.5.23.md)。
+The DSH plugin ships in the main package. See [DSH setup and standalone migration](docs/DSH.md).
 
 Claude 接管的真实宿主验证与社区修复见 [Claude 接管可靠性说明](docs/CLAUDE-RELIABILITY.md)。
 

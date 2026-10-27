@@ -201,6 +201,7 @@ export function safeAssistantStarts(messages) {
  const safe=[],pending=new Set()
  for(let i=0;i<messages.length;i++){
   const m=messages[i]
+  if(m.verifiedTurnBoundary)pending.clear()
   if(m.role==='assistant'&&!pending.size)safe.push(i)
   for(const tool of m.toolUses||[]){const id=typeof tool==='string'?tool:tool.tool_use_id||tool.id||tool.call_id;if(id)pending.add(id)}
   if(Array.isArray(m.toolResultIds)){for(const id of m.toolResultIds)pending.delete(id)}

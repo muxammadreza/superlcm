@@ -8,7 +8,7 @@ import {Context} from '@deepseek-ai/cordis'
 import Llm,{LlmAdapter,LlmError,createUserMessage} from '@deepseek-ai/dsh-llm'
 import {SessionStore} from '@deepseek-ai/dsh-session'
 import SessionProjections from '@deepseek-ai/dsh-session-projection'
-import Persistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import * as Persistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import Agents from '@deepseek-ai/dsh-agent'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -77,7 +77,7 @@ export async function lab({capacity=200000,mode='normal',config={},dir,seed,id='
   try {
     new SessionStore(ctx);new SessionProjections(ctx);new Llm(ctx)
     ctx.llm.registerAdapter(['lab-primary','lab-backup','lab-main'],new Offline())
-    if(persistent)new Persistence(ctx,{root:join(dir,'sessions'),compression:'none'})
+    if(persistent){const options={root:join(dir,'sessions'),compression:'none'};if(typeof Persistence.default==='function')new Persistence.default(ctx,options);else await ctx.plugin(Persistence,options).await()}
     new TokenMeter(ctx);new Agents(ctx)
     new SystemPrompt(ctx,{includeHarnessIdentity:false,includeRuntimeContext:false});new Tools(ctx,{mode:'native'})
     ctx.plugin(AgentLoop,{agents:[],maxParallelToolCalls:10})

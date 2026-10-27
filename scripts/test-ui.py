@@ -5,7 +5,7 @@ Queries actual model catalogs without sending a model prompt.
 import json,os,pathlib,subprocess,sys,hashlib
 from playwright.sync_api import sync_playwright
 ROOT=pathlib.Path(__file__).resolve().parents[1]
-config_paths=[pathlib.Path.home()/'.codex/config.toml',pathlib.Path.home()/'.codex/hooks.json',pathlib.Path.home()/'.claude.json',pathlib.Path.home()/'.claude/settings.json',pathlib.Path.home()/'.hermes/config.yaml',pathlib.Path.home()/'.hermes/shell-hooks-allowlist.json',pathlib.Path.home()/'.pi/agent/extensions/superlcm.ts']
+config_paths=[pathlib.Path.home()/'.codex/config.toml',pathlib.Path.home()/'.codex/hooks.json',pathlib.Path.home()/'.claude.json',pathlib.Path.home()/'.claude/settings.json',pathlib.Path.home()/'.pi/agent/extensions/superlcm.ts']
 def hashes():
  result={}
  for p in config_paths:
@@ -81,18 +81,18 @@ try:
   if page.locator('#tools [data-plugin="install"]').count():
    with page.expect_response(lambda r:'/api/claude-plugin' in r.url,timeout=120000) as inst:page.locator('#tools [data-plugin="install"]').click()
    assert inst.value.status==200,inst.value.text();page.wait_for_selector('#tools .tcard:has-text("Claude 插件 · v")',timeout=60000);print('setup claude-code plugin installed',flush=True)
-  for harness in ['codex','hermes','pi']:
+  for harness in ['codex','pi']:
    if not page.locator('[data-setup="'+harness+'"]:not([disabled])').count():print('skip',harness,'(not installed)');continue
    page.locator('[data-setup="'+harness+'"]').click()
    page.wait_for_function("() => document.getElementById('applySetup') && (!document.getElementById('applySetup').disabled || document.querySelector('.modal .notice.bad'))",timeout=30000)
    if page.locator('#applySetup').is_disabled():print('skip',harness,'(blocked on this computer:',page.locator('.modal .notice.bad').first.inner_text(),')');page.locator('.modal [data-close]').first.click();continue
    with page.expect_response(lambda r:'/api/setup-apply' in r.url) as setup:page.click('#applySetup')
-   result=setup.value.json();assert setup.value.status==200,result;assert result['saved'] and result['configuration_verified'] and (result['trust_granted'] or harness not in ('codex','hermes') or 'trust_error' in result or result['requires_review']),result
+   result=setup.value.json();assert setup.value.status==200,result;assert result['saved'] and result['configuration_verified'] and (result['trust_granted'] or harness not in ('codex',) or 'trust_error' in result or result['requires_review']),result
    page.wait_for_selector('.modal .steps li:nth-child(3).done, .modal .steps li:nth-child(3).fail',timeout=60000)
    note=page.locator('.modal .notice').inner_text();print('setup',harness,note,flush=True)
    assert page.locator('.modal .steps li:nth-child(3).done').count()==1,note
    page.screenshot(path=str(shots/('superlcm-setup-'+harness+'.png')))
-   if harness in ('codex','hermes') and page.locator('#openReview').count():
+   if harness in ('codex',) and page.locator('#openReview').count():
     page.click('#openReview');page.wait_for_selector('.modal .notice:has-text("已在终端打开")');page.wait_for_selector('#recheck')
    page.locator('.modal [data-close]').first.click()
   assert page.locator('#statusText').inner_text().startswith('已接入')
@@ -130,8 +130,8 @@ try:
   with page.expect_response(lambda r:'/api/api-models' in r.url) as added:page.click('#apiModels [data-am-save]')
   assert added.value.status==200,added.value.text();page.wait_for_selector('#apiModels .am-row:has-text("UI 模型 · 思考高")')
   page.locator('.nav [data-view="connect"]').click()
-  with page.expect_response(lambda r:'/api/settings' in r.url and r.request.method=='POST') as picked:page.select_option('select[data-tool="hermes"]','api')
-  assert picked.value.status==200;page.wait_for_selector('select[data-apimodel="hermes"]');assert 'UI 模型' in page.locator('select[data-apimodel="hermes"]').inner_text()
+  with page.expect_response(lambda r:'/api/settings' in r.url and r.request.method=='POST') as picked:page.select_option('select[data-tool="pi"]','api')
+  assert picked.value.status==200;page.wait_for_selector('select[data-apimodel="pi"]');assert 'UI 模型' in page.locator('select[data-apimodel="pi"]').inner_text()
   # 本工具后台写: each tool card offers that tool's own real model list.
   with page.expect_response(lambda r:'/api/settings' in r.url and r.request.method=='POST'):page.select_option('select[data-tool="codex"]','cli')
   page.wait_for_function("() => document.querySelectorAll('select[data-model=\"codex\"] option').length>2",timeout=30000)
@@ -162,7 +162,7 @@ try:
   assert page.locator('#error').is_hidden(),page.locator('#error').inner_text()
   browser.close()
  assert before==hashes(),'Real user configurations changed'
- print(json.dumps({'ok':True,'views':3,'merged_levels':True,'continue':True,'local_import':True,'fixture_setup':['codex','claude-code','hermes','pi'],'real_catalog':'codex','real_user_settings_unchanged':True},ensure_ascii=False))
+ print(json.dumps({'ok':True,'views':3,'merged_levels':True,'continue':True,'local_import':True,'fixture_setup':['codex','claude-code','pi'],'real_catalog':'codex','real_user_settings_unchanged':True},ensure_ascii=False))
 finally:
  server.terminate()
  try:server.wait(8)

@@ -11,7 +11,7 @@ import {summaryWork,buildHierarchy} from '../src/summarize.js'
 import {scheduleSummary} from '../src/summary-scheduler.js'
 import {summarizeWithClaudeCli} from '../src/claude-cli.js'
 import {summarizeWithCodexCli} from '../src/codex-cli.js'
-import {summarizeWithHermes,summarizeWithPi} from '../src/cli-writers.js'
+import {summarizeWithPi} from '../src/cli-writers.js'
 const english='Please check the original project and keep all files unchanged. Deployment has not been authorized.'
 function fixture(rows,kind='jsonl'){
  const dir=mkdtempSync(join(tmpdir(),'superlcm-failure 用户 # % ')),file=join(dir,'original'),store=new ClaudeStore(join(dir,'store'))
@@ -22,7 +22,7 @@ const dialects={
  claude:[{type:'assistant',message:{content:[{type:'tool_use',id:'c',name:'deploy',input:{command:'inspect only '.repeat(1000)}}]}},{type:'user',message:{content:[{type:'tool_result',tool_use_id:'c',is_error:true,content:'FAILED. Nothing was deployed.'}]}}],
  codex:[{type:'response_item',payload:{type:'function_call',call_id:'c',name:'inspect',arguments:'inspect '.repeat(1500)}},{type:'response_item',payload:{type:'function_call_output',call_id:'c',output:'FAILED. Nothing was deployed.'}}],
  pi:[{role:'assistant',content:[{type:'toolCall',id:'c',name:'inspect',arguments:'inspect '.repeat(1500)}]},{role:'toolResult',toolCallId:'c',isError:true,content:[{type:'text',text:'FAILED. Nothing was deployed.'}]}],
- hermes:[{role:'assistant',content:'Inspect only',tool_calls:[{id:'c',function:{name:'inspect',arguments:'inspect '.repeat(1500)}}]},{role:'tool',tool_call_id:'c',content:'FAILED. Nothing was deployed.'}],
+ openai:[{role:'assistant',content:'Inspect only',tool_calls:[{id:'c',function:{name:'inspect',arguments:'inspect '.repeat(1500)}}]},{role:'tool',tool_call_id:'c',content:'FAILED. Nothing was deployed.'}],
  dsh:[{dsh_session:'s',event:{seq:0,type:'assistant/message',surfaceOp:'append',data:{message:{content:[{type:'tool-call',id:'c',name:'inspect',arguments:'inspect '.repeat(1500)}]}}}},{dsh_session:'s',event:{seq:1,type:'tool/result',surfaceOp:'append',data:{message:{toolCallId:'c',isError:true,content:[{type:'text',text:'FAILED. Nothing was deployed.'}]}}}}]
 }
 for(const [name,rows] of Object.entries(dialects))test(`${name} summary segment retains the requested tool action and its failed outcome together`,()=>{
@@ -77,7 +77,7 @@ test('a changed model configuration admits a new attempt after a failed batch',a
   assert.ok(result.created)
  }finally{store.close()}
 })
-for(const [name,writer] of [['Claude',summarizeWithClaudeCli],['Codex',summarizeWithCodexCli],['Hermes',summarizeWithHermes],['Pi',summarizeWithPi]]){
+for(const [name,writer] of [['Claude',summarizeWithClaudeCli],['Codex',summarizeWithCodexCli],['Pi',summarizeWithPi]]){
  for(const overflow of [false,true])test(`${name} ${overflow?'oversized output':'timeout'} settles even when the child ignores SIGTERM`,{timeout:5000},async()=>{
   const dir=mkdtempSync(join(tmpdir(),'summary-child-')),signals=[]
   const child=Object.assign(new EventEmitter(),{stdin:new PassThrough(),stdout:new PassThrough(),stderr:new PassThrough(),kill(signal){signals.push(signal);if(signal==='SIGKILL')this.emit('close',null);return true}})

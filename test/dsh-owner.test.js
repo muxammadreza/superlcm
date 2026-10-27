@@ -37,7 +37,7 @@ async function fixture(run, response = async () => 'Current task and exact facts
     session.append('request/header',{header:{config:{provider:'chat-provider',model:'chat-model'}},reason:'initial'})
     const agent = {session,options:{provider:'fallback-provider',model:'fallback-model'},runMaintenance:async fn=>fn(signal)}
     const append = text => session.append('user/message',createUserMessage({content:[{type:'text',text}]}),{surfaceOp:'append'})
-    await run({ctx,owner,session,agent,signal,append,publish,config,calls,warnings})
+    await run({ctx,owner,session,agent,signal,append,publish,config,calls,warnings,dir})
   } finally {await ctx.fiber.dispose()}
 }
 
@@ -202,5 +202,28 @@ test('DSH takeover retries wrong language once without editing the summarized in
   const result=await summarizeAsyncRegion(engine,agent,prepared,signal)
   assert.equal(seen.length,2);assert.deepEqual(prepared.input,before);assert.deepEqual(session.surface.nodes,surface)
   assert.match(result.summary[0].text,/Current state/);assert.match(seen[1].messages.at(-1).content[0].text,/previous response failed/)
+ })
+})
+
+test('real DSH owner reloads global granularity and retention into the active engine',async()=>{
+ const {ClaudeStore}=await import('../src/store.js')
+ await fixture(async({ctx,owner,publish,dir})=>{
+  const store=new ClaudeStore(dir)
+  try {
+   store.setHarnessSetting('dsh','main-fork');store.setTuning({target_tokens:8000,fanout:6})
+   publish('keep-80k',{auto:true,budgetMode:'ratio',summaryMode:'main-fork',summaryAdapter:null,keepRecentTokens:80000,foldBatchTokens:64000})
+   await owner.reload()
+   assert.equal(owner.mode,'superlcm')
+   assert.equal(ctx.compaction.rollingConfig.keepRecentTokens,80000)
+   assert.equal(ctx.compaction.rollingConfig.foldBatchTokens,8000)
+   assert.equal(ctx.compaction.rollingConfig.condensedMinFanout,6)
+   const previous=ctx.compaction
+   store.setTuning({target_tokens:20000,fanout:4});await owner.reload()
+   assert.notEqual(ctx.compaction,previous);assert.equal(previous.retiring,true)
+   assert.equal(ctx.compaction.rollingConfig.foldBatchTokens,20000)
+   assert.equal(ctx.compaction.rollingConfig.condensedMinFanout,4)
+   publish('keep-20k',{auto:true,budgetMode:'ratio',summaryMode:'main-fork',summaryAdapter:null,keepRecentTokens:20000});await owner.reload()
+   assert.equal(ctx.compaction.rollingConfig.keepRecentTokens,20000)
+  }finally{store.close()}
  })
 })

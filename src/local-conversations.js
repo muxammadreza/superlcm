@@ -1,6 +1,4 @@
 import { dshConversations,importDshConversation } from './dsh-history.js'
-import { hermesConversations } from './native-snapshots.js'
-import { captureHermes } from './hermes.js'
 import { capturePi } from './pi.js'
 import { readdirSync, statSync, realpathSync, openSync, readSync, closeSync, existsSync } from 'node:fs'
 import { join, relative, isAbsolute, sep, basename } from 'node:path'
@@ -16,7 +14,6 @@ function peek(file){const fd=openSync(file,'r');try{const bytes=Buffer.alloc(Mat
 export function localConversations(store,harness,{env=process.env,offset=0,limit=30}={}) {
   if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(limit)||limit<1||limit>50)throw Error('Invalid local conversation page')
   if(harness==='dsh')return dshConversations(store,{env,offset,limit})
-  if(harness==='hermes')return hermesConversations(store,{env,offset,limit})
   const root=configFiles(harness,env).transcripts
   if(!existsSync(root))return {harness,root,conversations:[],total:0,next_offset:null,scan_limited:false}
   const canonical=realpathSync(root),files=[];let visited=0,limited=false
@@ -42,11 +39,6 @@ export function localConversations(store,harness,{env=process.env,offset=0,limit
 export function indexLocalConversation(store,harness,key,{env=process.env}={}) {
   if(typeof key!=='string'||!/^[a-f0-9]{64}$/.test(key))throw Error('Invalid local conversation selection')
   if(harness==='dsh')return importDshConversation(store,key,{env})
-  if(harness==='hermes'){
-    const {conversations}=hermesByKey(store,key,env)
-    const result=captureHermes(store,conversations.conversation_id,{env})
-    return {...result,source:store.metadata(result.session),summary_count:store.summaries(result.session).total,note:'已完整收录（含工具记录），之后的新消息会自动追加。未调用模型。'}
-  }
   let offset=0,entry
   do {const result=localConversations(store,harness,{env,offset,limit:50});entry=result.conversations.find(x=>x.key===key);if(entry)break;offset=result.next_offset}while(offset!==null)
   if(!entry?.can_index)throw Error(entry?.error||'Conversation is no longer available; rescan before indexing')
@@ -55,8 +47,4 @@ export function indexLocalConversation(store,harness,key,{env=process.env}={}) {
   const name=nativeConversationName(store,{harness,id:entry.conversation_id,file:entry.path,env})
   store.setMetadata(entry.session,{harness,externalId:entry.conversation_id,name:name||entry.name,nameSource:name?'native':entry.name_source||'derived'})
   return {...result,source:store.metadata(entry.session),summary_count:store.summaries(entry.session).total,note:'仅索引所选对话；未请求摘要模型。'}
-}
-function hermesByKey(store,key,env){
-  for(let offset=0;offset!==null;){const page=hermesConversations(store,{env,offset,limit:50});const hit=page.conversations.find(x=>x.key===key);if(hit)return {conversations:hit};offset=page.next_offset}
-  throw Error('Hermes conversation is no longer available; rescan before importing')
 }

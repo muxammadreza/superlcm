@@ -1,5 +1,5 @@
 // When SuperLcm runs from the Claude plugin, its files sit in a versioned folder that Claude replaces (and
-// deletes) on every plugin update. Codex, Hermes and Pi are connected to one fixed file in the SuperLcm folder
+// deletes) on every plugin update. Codex and Pi are connected to one fixed file in the SuperLcm folder
 // instead, which starts the current plugin copy and, if that copy is gone, the newest one Claude has installed.
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join, sep } from 'node:path'

@@ -28,11 +28,10 @@ const effective=(store,session)=>store.effectiveSetting(session)
 // Only migrated claims with an empty ID accept the legacy protocol. A newly
 // issued claim always requires its exact UUID, even when the batch is unchanged.
 const hostClaimMatches=(claim,input,revision)=>!!claim&&(claim.claim_id?input.claim_id===claim.claim_id:!input.claim_id&&claim.revision===revision)
-const readHook=()=>new Promise((resolve,reject)=>{let text='';process.stdin.setEncoding('utf8');process.stdin.on('data',part=>{text+=part;if(text.length>200000)reject(new Error('Oversized hook input'))});process.stdin.on('end',()=>{try{const input=JSON.parse(text);if(!input||typeof input!=='object'||Array.isArray(input))throw Error('Invalid hook input');resolve(input)}catch(error){reject(error)}});process.stdin.on('error',reject)})
+const readHook=(limit=200000)=>new Promise((resolve,reject)=>{let text='',oversized=false;process.stdin.setEncoding('utf8');process.stdin.on('data',part=>{if(oversized)return;text+=part;if(text.length>limit){oversized=true;text='';reject(new Error('Oversized hook input'))}});process.stdin.on('end',()=>{if(oversized)return;try{const input=JSON.parse(text);if(!input||typeof input!=='object'||Array.isArray(input))throw Error('Invalid hook input');resolve(input)}catch(error){reject(error)}});process.stdin.on('error',reject)})
 // 对话模型生成: one short note per turn, only when a whole piece is waiting. The AI writes it from memory
 // (it has just been through that part); a piece that straddles a compaction comes with its text instead.
 // Written as what it is, a note from the plugin the user installed, so a model does not read it as an injection.
-const summaryNudge=(store,session)=>summaryWork(store,session)?`Note from SuperLcm, the conversation-memory plugin the user installed: the user chose to have you write this conversation's summaries yourself, and one piece (${session}) is ready. When you have answered, call lcm_summary_task {"conversation":"${session}","recent":true}. If the result says from_memory, summarize that stretch from your own context; otherwise summarize the text it returns. Then call lcm_summary_submit with its batch_id, and repeat while more is true, at most 3 pieces. This is routine bookkeeping that needs no mention to the user; only say a summary was saved if the tool confirms it.`:null
 // Whether the newest compaction in a Claude Code transcript was answered by SuperLcm's packet.
 // The newest compaction in the transcript and whether it carries SuperLcm's packet.
 function lastCompaction(path) {
@@ -60,7 +59,8 @@ function compactNotice({own,run,records,code}) {
   return zh?`对话已压缩 · Claude Code 自带压缩 · ${n} 条原文仍保存在 #${code}`:`Conversation compacted · by Claude Code · ${n} original records still kept as #${code}`
 }
 const derivedTitle=(store,session)=>store.eventRows(session).find(e=>e.preview.startsWith('user:'))?.preview.replace(/^user:\s*/,'').replace(/\s+/g,' ').trim().slice(0,90)
-if (command==='setup' || command==='doctor-local') {
+if(command==='fork-deny'){process.stdin.resume();const {deniedForkTool}=await import('./native-fork.js');process.stdout.write(JSON.stringify(deniedForkTool())+'\n')}
+else if (command==='setup' || command==='doctor-local') {
   const store=new ClaudeStore()
   try {
     const {harnessConnections}=await import('./harness.js')
@@ -80,24 +80,57 @@ else if (command==='web') {
   try { const web=await startWeb({port});process.stdout.write(`SuperLcm local console: ${web.url}\n`) }
   catch(error) { if(error.code!=='EADDRINUSE')throw error; process.stderr.write(`Port ${port} is already in use. If the console is already running, open http://127.0.0.1:${port}/ ; otherwise pass another port: node src/cli.js web <port>\n`); process.exitCode=1 }
 }
-else if (command==='hermes-hook' || command==='pi-hook') {
-  // Called by Hermes (shell hook, synchronous) and by the SuperLcm Pi extension after each turn.
-  const store=new ClaudeStore(),hermes=command==='hermes-hook'
+else if (['pi-prepare','pi-stage','pi-ready','pi-compact'].includes(command)) {
+  const store=new ClaudeStore()
+  try {
+    const {preparePi,readPreparedPi,stagePi}=await import('./pi-compaction.js')
+    const input=await readHook(70*1024*1024)
+    // Generation is allowed only in the explicit background-preparation command.
+    if(command==='pi-compact')throw Error('Pi 接管已改为后台准备，请重新加载旧版 Pi 扩展')
+    process.stdout.write(JSON.stringify({prepared:command==='pi-stage'?stagePi(store,input):command==='pi-prepare'?await preparePi(store,input):readPreparedPi(store,input)})+'\n')
+  } catch(error) {
+    process.stdout.write(JSON.stringify({error:error.message})+'\n');process.exitCode=1
+  } finally {store.close()}
+}
+else if (command==='pi-policy') {
+  const store=new ClaudeStore()
+  try {
+    const {readPiPolicy,savePiPolicy}=await import('./pi-compaction-policy.js')
+    const value=flag=>{const i=rest.indexOf(flag);if(i<0)return undefined;if(!rest[i+1]||rest[i+1].startsWith('--'))throw Error('Missing '+flag+' value');return rest[i+1]}
+    if(rest.includes('--enable')&&rest.includes('--disable'))throw Error('Choose --enable or --disable')
+    if(rest.length&&!rest.includes('--enable')&&!rest.includes('--disable'))throw Error('Use --enable or --disable to change Pi compaction')
+    if(rest.includes('--enable')) {
+      const summaryMode=value('--summary-mode')||(value('--api-ref')?'api':readPiPolicy(store.dir,store.db).summaryMode)
+      if(!['api','main-fork'].includes(summaryMode))throw Error('Unknown Pi summary mode')
+      const ref=value('--api-ref')
+      if(summaryMode!=='main-fork'&&(!ref||!store.apiModel(ref)))throw Error('Select an existing summary model with --api-ref')
+      const ratio=Number(value('--ratio')??0.8)
+      if(!Number.isFinite(ratio)||ratio<0.5||ratio>0.95)throw Error('Pi ratio must be 0.5–0.95')
+      if(ref)store.setHarnessSetting('pi','api',null,null,null,ref)
+      savePiPolicy(store,{enabled:true,ratio,summaryMode})
+    } else if(rest.includes('--disable'))savePiPolicy(store,{enabled:false,ratio:readPiPolicy(store.dir).ratio})
+    process.stdout.write(JSON.stringify({policy:readPiPolicy(store.dir),summary:store.harnessSetting('pi')})+'\n')
+  }catch(error){process.stderr.write(error.message+'\n');process.exitCode=1}finally{store.close()}
+}
+// Retired hooks stay inert so an older host configuration cannot resume capture.
+else if (command==='hermes-hook') { process.stdin.resume();process.stdout.write('{}\n') }
+else if (command==='pi-hook') {
+  // Called by the SuperLcm Pi extension after each turn.
+  const store=new ClaudeStore()
   let reply={}
   try {
     const input=await readHook(),event=input.hook_event_name
     // A background summary run (SUPERLCM_CLI_WORKER) is never captured as a conversation.
-    if(process.env.SUPERLCM_CLI_WORKER==='1'||!store.integrationEnabled(hermes?'hermes':'pi'))throw Object.assign(new Error('skip'),{quiet:true})
-    const {captureHermes}=await import('./hermes.js'),{capturePi}=await import('./pi.js')
-    const result=hermes?captureHermes(store,input.session_id,{automatic:true}):capturePi(store,input,{automatic:true})
+    if(process.env.SUPERLCM_CLI_WORKER==='1'||!store.integrationEnabled('pi'))throw Object.assign(new Error('skip'),{quiet:true})
+    const {capturePi}=await import('./pi.js')
+    const result=capturePi(store,input,{automatic:true})
     if(!result.skipped&&store.source(result.session)){
-      store.markClient(hermes?'hermes':'pi','hook')
+      store.markClient('pi','hook')
       const {mode,model}=effective(store,result.session)
-      if(['off','cli','api'].includes(mode))store.setSummaryMode(result.session,mode)
+      if(['off','cli','api','main-fork'].includes(mode))store.setSummaryMode(result.session,mode)
       if(event==='session_compact')store.markCompaction(result.session)
-      if(['on_session_end','on_session_finalize','agent_settled','session_compact','session_shutdown'].includes(event))scheduleSummary(store,result.session,mode,model)
-      // Hermes pre_llm_call / Pi before_agent_start: the only moments a note can reach the AI this turn.
-      if(['pre_llm_call','before_agent_start'].includes(event)&&mode==='agent'){const note=summaryNudge(store,result.session);if(note)reply={context:note}}
+      if(['agent_settled','session_compact','session_shutdown'].includes(event))scheduleSummary(store,result.session,mode,model)
+      // Pi before_agent_start: the only moments a note can reach the AI this turn.
     }
   } catch(error) { if(!error.quiet)process.stderr.write('SuperLcm: '+error.message+'\n') }
   finally { store.close() }
@@ -128,10 +161,9 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
             const title=nativeConversationName(store,{harness:codex?'codex':'claude-code',id:input.session_id,file:file||store.source(session).path})
             store.setMetadata(session,{harness:codex?'codex':'claude-code',externalId:input.session_id,name:title||derivedTitle(store,session),nameSource:title?'native':'derived'})
             const {mode,model}=effective(store,session)
-            if (['off','cli','api'].includes(mode)) store.setSummaryMode(session,mode)
+            if (['off','cli','api','main-fork'].includes(mode)) store.setSummaryMode(session,mode)
             if (event==='PostCompact' || (event==='SessionStart' && input.source==='compact')) store.markCompaction(session)
             if (shouldIndex && ['Stop','PostCompact','SessionEnd'].includes(event)) scheduleSummary(store,session,mode,model)
-            if (event==='UserPromptSubmit' && mode==='agent' && summaryWork(store,session)) process.stdout.write(summaryNudge(store,session)+'\n')
           }
           // After a compaction: a line for the user (systemMessage) either way, and for Claude only after Claude
           // Code's own compaction; SuperLcm's packet already says where the originals are.
@@ -162,7 +194,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
       if (!store.source(rest[0])) throw new Error('Unknown session')
       // --backend runs one explicit subscription pass (console "generate now"), independent of the saved mode.
       const backendFlag=rest.indexOf('--backend'),backend=backendFlag>=0?rest[backendFlag+1]:null
-      if (backend!==null && !['cli','api'].includes(backend)) throw new Error('--backend must be cli or api')
+      if (backend!==null && !['cli','api','main-fork'].includes(backend)) throw new Error('--backend must be main-fork, cli or api')
       const runFlag=rest.indexOf('--run'),runId=runFlag>=0?rest[runFlag+1]:process.env.SUPERLCM_SUMMARY_RUN_ID||null
       const {runSummaryWorker}=await import('./summary-worker.js')
       try {result=await runSummaryWorker(store,rest[0],{runId,backend})}
@@ -225,8 +257,9 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
       const plan=()=>{
         const current=store.takeover()
         if(!current.enabled)return {use:false,reason:'compaction takeover is off'}
+        if(current.ratio!=null&&!(input.window>0))return {use:false,reason:'current model capacity unavailable'}
         const context=verifiedCompactionInput(store,session,input.messages||[])
-        return planCompaction({meta:store.metadata(session),events:context.events,nodes:claudeCompactionNodes(store,session),messages:context.messages,instructions:input.instructions||'',tokens:input.tokens||0,window:Math.min(input.window||current.window,current.window),keepTokens:current.keep,trigger:input.trigger})
+        return planCompaction({meta:store.metadata(session),events:context.events,nodes:claudeCompactionNodes(store,session),messages:context.messages,instructions:input.instructions||'',tokens:input.tokens||0,window:current.ratio!=null?(input.window||0)*current.ratio:Math.min(input.window||current.window,current.window),keepTokens:current.keep,trigger:input.trigger})
       }
       const note=(result,stage,catchupMs=null)=>store.noteCompaction(session,{...compactionDiagnostic(result,{nodes:store.nodeRows(session,0),records:store.stats(session).records,before:input.tokens||0,trigger:input.trigger}),stage:stage||(result.stage==='inline'||result.inline?'inline':'first'),pending:pendingLeaves(store,session),after:result.after??null,catchupMs})
       const notePlan=(result,stage,ms=null)=>{
@@ -266,7 +299,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
         }
       }
       if(reply.use)store.noteTakeover(session,input.tokens||0,reply.after||0)
-      else if(!reply.ambiguous&&store.integrationEnabled('claude-code')&&store.metadata(session).harness==='claude-code'&&['coverage_lag','uncovered_oldest','no_summaries','context_too_large','unplaced_boundary'].includes(compactionDiagnostic(reply).code))reply.rescue=true
+      else if(chosen.mode!=='main-fork'&&!reply.ambiguous&&store.integrationEnabled('claude-code')&&store.metadata(session).harness==='claude-code'&&['coverage_lag','uncovered_oldest','no_summaries','context_too_large','unplaced_boundary'].includes(compactionDiagnostic(reply).code))reply.rescue=true
     }
     if(src&&(!setting.enabled||store.isDeleted(session)))store.noteCompaction(session,compactionDiagnostic(reply,{nodes:store.nodeRows(session,0),records:store.stats(session).records,before:input.tokens||0,trigger:input.trigger}))
   } catch(error) { reply={use:false,reason:'compaction planner failed; originals retained',error:true};if(rest[0]&&store.source(rest[0]))store.noteCompaction(rest[0],compactionDiagnostic(reply,{records:store.stats(rest[0]).records})) }
@@ -383,4 +416,4 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
   const store=new ClaudeStore()
   try { const results=store.archiveAll(); for(const r of results)if(!r.archived||r.copied||r.found_at)process.stdout.write(JSON.stringify(r)+'\n'); process.stdout.write(`archived ${results.filter(r=>r.archived).length}/${results.length} conversations\n`); if(results.some(r=>!r.archived))process.exitCode=1 }
   finally { store.close() }
-} else { process.stderr.write('Usage: node src/cli.js mcp|web [port]|archive|compact-packet <session>|doctor-local|setup <codex|claude-code|hermes|pi|dsh> [--provider name] [--model name] [--apply]|hook|codex-hook|hermes-hook|pi-hook|index|index-codex|import <path> [session] [harness] [name]|name <session> <title>|overview|summarize\n'); process.exitCode=2 }
+} else { process.stderr.write('Usage: node src/cli.js mcp|web [port]|archive|compact-packet <session>|doctor-local|setup <codex|claude-code|pi|dsh> [--provider name] [--model name] [--apply]|hook|codex-hook|pi-hook|index|index-codex|import <path> [session] [harness] [name]|name <session> <title>|overview|summarize\n'); process.exitCode=2 }

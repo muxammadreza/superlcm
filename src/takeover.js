@@ -62,21 +62,28 @@ function withValues(settings, values) {
   return next
 }
 const clamp = (v, [lo, hi]) => Math.min(hi, Math.max(lo, v))
-export function applyTakeover(store, { enabled, window, keep }, env = process.env) {
+export function applyTakeover(store, { enabled, window, keep, ratio }, env = process.env) {
+  const explicitWindow=window!==undefined
   const current = store.takeover(), file = settingsFile(env), settings = readSettings(file)
   // Sizes an older version allowed are brought inside today's limits rather than refused, also when the
   // console sends the stored value back unchanged.
   const fit = (value, stored, limits) => value == null || value === stored ? clamp(stored, limits) : value
   window = fit(window, current.window, takeoverLimits.window); keep = fit(keep, current.keep, takeoverLimits.keep)
-  const restore = () => store.setTakeover({ ...current, window: clamp(current.window, takeoverLimits.window), keep: clamp(current.keep, takeoverLimits.keep) })
+  ratio = ratio == null ? (explicitWindow ? undefined : current.ratio) : ratio
+  if(ratio!=null&&(!Number.isFinite(ratio)||ratio<.11||ratio>.99))throw Error('压缩比例必须在 11% 到 99% 之间')
+  const restore = () => store.setTakeover({ ...current, ratio:current.ratio??null,window: clamp(current.window, takeoverLimits.window), keep: clamp(current.keep, takeoverLimits.keep) })
   if (enabled) {
     // Claude Code's own values are remembered when turning on, so changing the size keeps the originals; a
     // key an older version did not remember is taken now, before this version changes it.
     const previous = JSON.stringify(current.enabled ? { ...own(settings), ...remembered(current.previous) } : own(settings))
-    store.setTakeover({ enabled: true, window, keep, previous })
+    store.setTakeover({ enabled: true, window, keep, ratio:ratio??null, previous })
     // If Claude's settings cannot be written, the takeover stays as it was rather than on in name only.
     try {
-      const now = readSettings(file), host = claudeWindowFor(window), next = withValues(now, { window: host, env: host, pct: claudePctFor(window, outputReserve(now, env)) })
+      const now = readSettings(file), host = claudeWindowFor(window)
+      // Ratio mode uses the native model capacity (and any original user cap),
+      // rather than an artificial 1M window installed by older takeover code.
+      const values=ratio==null?{window:host,env:host,pct:claudePctFor(window,outputReserve(now,env))}:{...remembered(previous),pct:Math.round(ratio*10000)/100}
+      const next=withValues(now,values)
       if (JSON.stringify(next) !== JSON.stringify(now)) writeSettings(file, next)
     } catch (error) { restore(); throw error }
   } else {
@@ -84,7 +91,7 @@ export function applyTakeover(store, { enabled, window, keep }, env = process.en
       const now = readSettings(file), next = withValues(now, remembered(current.previous))
       if (JSON.stringify(next) !== JSON.stringify(now)) writeSettings(file, next)
     }
-    store.setTakeover({ enabled: false, window, keep, previous: null })
+    store.setTakeover({ enabled: false, window, keep, ratio:ratio??null, previous: null })
   }
   return { ...store.takeover(), claude_window: claudeCompactWindow(env) }
 }

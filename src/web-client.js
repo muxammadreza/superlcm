@@ -4,10 +4,10 @@ const $ = selector => document.querySelector(selector)
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 const fmt = n => Number(n || 0).toLocaleString(LOCALE)
 const q = encodeURIComponent
-const NAMES = { codex: 'Codex', 'claude-code': 'Claude Code', hermes: 'Hermes', pi: 'Pi', dsh: 'dsh harness', opencode: 'OpenCode', gemini: 'Gemini CLI', import: t('导入'), legacy: t('早期记录') }
+const NAMES = { codex: 'Codex', 'claude-code': 'Claude Code', pi: 'Pi', dsh: 'dsh harness', opencode: 'OpenCode', gemini: 'Gemini CLI', import: t('导入'), legacy: t('早期记录') }
 const toolName = h => NAMES[h] || h
 const state = { view: 'conversations', listView:'all',harnesses: [], rows: [], total: 0, offset: 0, groups: [], h: '', sel: null, query: '', detail: null, open: new Set(), children: new Map(), target: null }
-const SUMMARY_LABELS={queued:'摘要已排队',starting:'摘要正在启动',running:'正在生成摘要',failed:'摘要失败',lost:'摘要进程已中断',behind:'有待写摘要',up_to_date:'完整片段已写完',configured:'后台摘要已配置',off:'后台摘要已关闭',agent:'由对话模型生成',unconfigured:'摘要尚未配置'}
+const SUMMARY_LABELS={queued:'摘要已排队',starting:'摘要正在启动',running:'正在生成摘要',failed:'摘要失败',lost:'摘要进程已中断',behind:'有待写摘要',up_to_date:'完整片段已写完',configured:'后台摘要已配置',off:'后台摘要已关闭',unconfigured:'摘要尚未配置'}
 const ERROR_LABELS={rate_limit:'请求频率受限',auth:'身份验证失败',quota:'额度不足',timeout:'请求超时',quality:'摘要格式或语言不符',spawn:'进程启动失败',worker_lost:'进程意外结束'}
 const summaryPill=h=>h?'<span class="summary-pill '+esc(h.state)+'">'+esc(t(SUMMARY_LABELS[h.state]||h.state))+'</span>':''
 
@@ -54,12 +54,13 @@ function show(view, updateHash = true) {
   const parts=String(view).split('/')
   view=parts[0]
   if(view==='settings'&&parts[1]==='compact')view='compression'
+  const compact=view==='compression'
   if (!views.includes(view)) view = 'conversations'
   state.view = view
   for (const b of document.querySelectorAll('.nav button')) b.dataset.view === view ? b.setAttribute('aria-current', 'page') : b.removeAttribute('aria-current')
   for (const v of views) $('#view-' + v).hidden = v !== view
-  if(view==='compression')compressionSection(parts[1]==='dsh'?'dsh':parts[1]==='claude-code'?'claude-code':state.compressionTool||'claude-code',false)
-  if (updateHash) history.replaceState(null, '', '#' + view+(view==='compression'?'/'+state.compressionTool:''))
+  if(compact){compressionSection(['dsh','pi','claude-code'].includes(parts[1])?parts[1]:state.compressionTool||'claude-code',false)}
+  if (updateHash) history.replaceState(null, '', '#' + (compact?'compression/'+state.compressionTool:view))
 }
 for (const b of document.querySelectorAll('.nav button')) b.onclick = () => show(b.dataset.view)
 // The brand always returns to the conversation list (also leaving the phone detail view).
@@ -111,10 +112,11 @@ function renderList() {
   $('#rows').innerHTML = rows.length ? rows.map(c => {
     const count = c.raw_records ?? c.records, summarized = c.summarized_records ?? c.summarized_to
     const pct = count ? Math.round(Math.min(summarized, count) / count * 100) : 0
+    const health = c.summary_health, status = health ? t(SUMMARY_LABELS[health.state] || health.state) : ''
     const cause=c.summary_health?.run?.error_kind||'unknown',header=state.listView==='attention'&&cause!==previousCause?'<div class="summary-cause">'+esc(t(ERROR_LABELS[cause]||'原因未确认'))+'</div>':'';previousCause=cause
     return header+'<div class="row-wrap"><button type="button" class="row" role="option" aria-selected="' + (c.session === state.sel) + '" data-id="' + esc(c.session) + '">' + mark(c.harness) +
-      '<span class="name">' + esc(c.name) + '</span><span class="meta">'+summaryPill(c.summary_health)+(c.headless?'<span class="tag">'+t('无交互任务')+'</span>':'')+(state.listView==='attention'&&c.summary_health?.run?.error_kind?'<span>'+esc(c.summary_health.run.error_kind)+'</span>':'')+'<span class="num">' + t('{n} 条', { n: fmt(c.records) }) + '</span><span>·</span><span>' + ago(c.updated_ms) + '</span>' +
-      (c.summary_count ? '<span class="mini" title="' + t('摘要覆盖 {n}%', { n: pct }) + '"><i style="width:' + pct + '%"></i></span>' : '<span>' + t('暂无摘要') + '</span>') + '</span></button>' + delButton(c) + '</div>'
+      '<span class="name">' + esc(c.name) + '</span><span class="meta"><span class="num">' + t('{n} 条', { n: fmt(c.records) }) + '</span><span aria-hidden="true">·</span><span class="updated">' + ago(c.updated_ms) + '</span>' +
+      '<span class="mini' + (health?.needs_attention ? ' attention' : '') + '" role="img" aria-label="' + esc([status, t('摘要覆盖 {n}%', { n: pct })].filter(Boolean).join(' · ')) + '" title="' + esc([status, t('摘要覆盖 {n}%', { n: pct })].filter(Boolean).join(' · ')) + '"><i style="width:' + pct + '%"></i></span></span></button>' + delButton(c) + '</div>'
   }).join('') : '<div class="empty"><span>' + t('还没有对话记录。') + '</span><button type="button" class="btn primary" id="goConnect">' + t('接入第一个工具') + '</button></div>'
   $('#listCount').textContent = t('{n} 个对话', { n: state.total })
   $('#more').hidden = state.offset === null
@@ -224,7 +226,7 @@ function stripHtml(d) {
 }
 // One clear action; the method (and whose quota it spends) is chosen in a confirmation dialog.
 // Only methods this computer can run are offered: installed CLIs and a saved custom API.
-const BACKENDS = {
+const BACKENDS = {'main-fork': ['主模型后台分支','沿用当前对话模型与请求前缀，一次生成整棵摘要树；缓存命中以实际用量为准。'],
   cli: ['{tool} 后台写', '另起一个 {tool} 进程，用你在 {tool} 里配置的账号和模型来写，额度或计费也算在那边；不占用正在聊的对话。'],
   api: ['自定义 API', '使用设置里保存的接口和密钥，按服务商价格计费。']
 }
@@ -277,13 +279,12 @@ function renderDetail() {
   else if (d.summarizing) html += '<div class="notice calm"><span><b>' + t('正在生成摘要…') + '</b>' + t('完成的部分会陆续出现在下方。') + '</span></div>'
   else if (d.status === 'summary_error') html += '<div class="notice bad"><span><b>' + t('上次摘要生成失败。') + '</b>' + t('请确认所选方式可用（命令行工具已登录，或 API 密钥有效），然后重试。') + (d.summary_error_detail ? '<br>' + esc(d.summary_error_detail) : '') + '</span><span class="actions">' + generateButton('重新生成摘要…') + '</span></div>'
   // Count pending work, not records: most records are tool calls with no text and need no summary.
-  else if (d.summary_count && d.estimate?.calls >= 2 && d.setting.mode === 'agent') html += '<div class="notice"><span><b>' + t('摘要滞后：还差约 {n} 次摘要（含向上合并）。', { n: fmt(d.estimate.calls) }) + '</b>' + t('对话模型生成每轮只处理一段，跟不上新增内容。可以在后台一次补齐。') + '</span><span class="actions">' + generateButton('补齐摘要…') + '</span></div>'
   if (d.summary_count) {
     html += '<div><div class="section-h"><h2>' + t('摘要目录') + '</h2><span class="aside"><button type="button" class="link" id="collapseAll">' + t('收起全部') + '</button></span></div><div class="tree">' + d.nodes.map(nodeHtml).join('') +
       (tail > 0 ? '<div class="tail-row"><span>' + t('最新 {n} 条（{r}）尚未摘要', { n: '<b class="num">' + fmt(tail) + '</b>', r: '#' + tailRange.from + '–#' + tailRange.to }) + '</span><button type="button" class="btn small" data-raw="' + Math.max(tailRange.from, tailRange.to - 60) + '-' + tailRange.to + '">' + t('查看原文') + '</button></div>' : '') +
       (selected && d.unsummarized_records > tail ? '<div class="tail-row">' + t('另有 {n} 条较早有效原文未被选入摘要，原文仍可查。', { n: fmt(d.unsummarized_records - tail) }) + '</div>' : '') + '</div></div>'
   } else {
-    html += '<div class="notice calm"><span><b>' + t('此对话暂无摘要。') + '</b>' + t('{n} 条原文已完整保存，AI 可按编号读取和搜索；接续时将提供最近的原文。', { n: fmt(d.records) }) + (d.setting.mode === 'agent' ? t('对话模型生成只在该对话继续进行时才会写摘要。') : '') + '</span></div>' +
+    html += '<div class="notice calm"><span><b>' + t('此对话暂无摘要。') + '</b>' + t('{n} 条原文已完整保存，AI 可按编号读取和搜索；接续时将提供最近的原文。', { n: fmt(d.records) }) + '</span></div>' +
       '<div class="actions">' + (d.summarizing||d.summary_health?.active ? '' : generateButton('生成摘要…', 'btn primary')) + '<button type="button" class="btn" data-raw="' + Math.max(0, d.records - 60) + '-' + Math.max(d.records - 1, 0) + '">' + t('查看最近原文') + '</button></div>'
   }
   $('#detail').innerHTML = html + '</div>'

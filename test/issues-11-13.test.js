@@ -25,7 +25,7 @@ const summary='# Synthetic state\nThe user authorized a dry run. The synthetic t
 function fixture(t,n=1){
  const dir=mkdtempSync(join(tmpdir(),'superlcm-11-13-')),store=new ClaudeStore(join(dir,'store'))
  const env={...safeEnv(),HOME:dir,USERPROFILE:dir,SUPERLCM_HOME:store.dir,SUPERLCM_SEGMENT_MESSAGES:'2',SUPERLCM_CLAUDE_CLI_BIN:process.execPath,CLAUDE_CONFIG_DIR:join(dir,'claude'),CODEX_HOME:join(dir,'codex')}
- store.setHarnessSetting('claude-code','cli','synthetic-host')
+ store.setHarnessSetting('claude-code','cli','synthetic-host');store.setHarnessSetting('codex','cli')
  const add=(id,{headless=false,harness='claude-code',header=null}={})=>{
   const file=join(dir,id+'.jsonl'),rows=Array.from({length:6},(_,i)=>({role:i%2?'assistant':'user',content:'Synthetic dry-run progress '+i}))
   writeFileSync(file,[...(header?[header]:[]),...rows].map(JSON.stringify).join('\n')+'\n')
@@ -319,7 +319,7 @@ test('queued host is stopped on settings changes and explicit API retry atomical
  assert.match(f.cli('summary-claim','s1').none,/queue/);const old=f.store.latestSummaryRun('s1');assert.equal(old.route,'host')
  f.store.setHarnessSetting('claude-code','off');drainSummaryQueue(f.store,{env:f.env,spawnProcess:f.spawnProcess})
  assert.equal(f.store.latestSummaryRun('s1').state,'stopped');assert.equal(summaryHealth(f.store,'s1',{env:f.env}).active,false);assert.equal(f.children.length,0)
- f.store.setGlobalSetting('api','fake-api','openai','http://127.0.0.1:9/v1');f.store.setHarnessSetting('claude-code','cli','synthetic-host')
+ f.store.setGlobalSetting('api','fake-api','openai','http://127.0.0.1:9/v1');f.store.setHarnessSetting('claude-code','cli','synthetic-host');f.store.setHarnessSetting('codex','cli')
  assert.match(f.cli('summary-claim','s1').none,/queue/);const queued=f.store.latestSummaryRun('s1')
  const replacement=enqueueSummary(f.store,'s1',{backend:'api',origin:'manual',env:f.env});assert.equal(replacement.added,true);assert.equal(replacement.run.route,'worker');assert.equal(replacement.run.backend,'api')
  assert.equal(f.store.db.prepare('SELECT state,stop_reason FROM summary_runs WHERE id=?').get(queued.id).stop_reason,'manual-takeover')

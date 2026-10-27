@@ -1,3 +1,4 @@
+import {mountDshPersistence} from './dsh-persistence.js'
 // Read native generations through DSH's installed persistence provider. Opening
 // with read access does not publish migrations, repair logs or acquire writers.
 import { existsSync,realpathSync,statSync,readdirSync } from 'node:fs'
@@ -24,9 +25,9 @@ function compression(root) {
 }
 async function reader(env) {
   const host=dshHost(env),load=name=>import(pathToFileURL(host.require.resolve(name)).href)
-  const [{Context},{default:Persistence},{extractSessionEventText}]=await Promise.all([load('@deepseek-ai/cordis'),load('@deepseek-ai/dsh-session-persistence-jsonl'),load('@deepseek-ai/dsh-session-query')])
+  const [{Context},persistenceModule,{extractSessionEventText}]=await Promise.all([load('@deepseek-ai/cordis'),load('@deepseek-ai/dsh-session-persistence-jsonl'),load('@deepseek-ai/dsh-session-query')])
   const ctx=new Context()
-  try {return {ctx,persistence:new Persistence(ctx,{root:join(dshHome(env),'sessions'),compression:compression(join(dshHome(env),'sessions'))}),extract:extractSessionEventText}}
+  try {return {ctx,persistence:await mountDshPersistence(ctx,persistenceModule,{root:join(dshHome(env),'sessions'),compression:compression(join(dshHome(env),'sessions'))}),extract:extractSessionEventText}}
   catch(error){await ctx.fiber.dispose();throw error}
 }
 const rawContext=native=>({sessionPersistence:native.persistence,sessionQuery:{listSessions:async()=>(await native.persistence.listArtifacts()).map(row=>({header:row.header}))}})

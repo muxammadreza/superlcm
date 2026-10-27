@@ -1,3 +1,4 @@
+import { summarizeMainFork } from './main-fork.js'
 import {SUMMARY_POLICY_VERSION} from '../src/summary-policy.js'
 import { randomUUID } from 'node:crypto'
 import { nativePreStep, registerRequestBoundary } from './request-boundary.js'
@@ -14,8 +15,8 @@ import { carryPrefix, buildDraftTree, assembleTree, draftTokens, summaryBudget, 
 import { selectionPricing } from './selection-pricing.js'
 import { selectSummaryCondensation } from './summary-prefix.js'
 import { SessionFoldRegistry, SummaryGuards } from './summary-guards.js'
-import { SuperLcmStore, resolveDatabasePath } from './store.js'
-import { join } from 'node:path'
+import { SuperLcmStore,resolveDatabasePath } from './store.js'
+import {join} from 'node:path'
 import { summaryContext } from './summary-model.js'
 import { summarizeWithRecall } from './engine-summary.js'
 import {abortable} from './summary-attempt.js'
@@ -55,11 +56,11 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
     this.rollingConfig = rolling
     ctx.logger?.info?.('SuperLcm：已启用后台分批组装，达到压缩门槛后一次替换上下文')
     this.fallbackSummarizationRoute = fallbackRoute
-    this.superLcmStore = new SuperLcmStore(config.archiveHome ? join(config.archiveHome,'lcm.sqlite') : resolveDatabasePath())
+    this.superLcmStore = new SuperLcmStore(config.archiveHome?join(config.archiveHome,'lcm.sqlite'):resolveDatabasePath())
     this.compressionReporter = this.superLcmStore.compressionReporter({
       kind: 'engine', profile: ctx.get?.('profileContext')?.name || null,
       enabled: this.config.auto === true,
-      routeReady: !!this.config.summarizationProvider && !!this.config.summarizationModel,
+      routeReady: rolling.summaryMode === 'main-fork' || !!this.config.summarizationProvider && !!this.config.summarizationModel,
       onError: () => ctx.logger?.warn?.('SuperLcm 压缩状态写入失败'),
     })
     this.backgroundFolds = new SessionFoldRegistry()
@@ -120,7 +121,7 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
       provider: raw.summarizationProvider,
       model: raw.summarizationModel,
     })
-    if (!routeIsComplete(route) || !routeIsConfigured(route)) {
+    if (raw.summaryMode !== 'main-fork' && (!routeIsComplete(route) || !routeIsConfigured(route))) {
       throw new Error('background compaction requires an explicit summarization provider and model')
     }
     const { rolling, fallbackRoute } = splitConfig(raw)
@@ -141,7 +142,7 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
     this.rollingConfig = rolling
     this.fallbackSummarizationRoute = fallbackRoute
     this.summaryGuards.clear()
-    this.compressionReporter.configure({ enabled: this.config.auto === true, routeReady: !!route.provider && !!route.model })
+    this.compressionReporter.configure({ enabled: this.config.auto === true, routeReady: rolling.summaryMode === 'main-fork' || !!route.provider && !!route.model })
     this.config = {
       ...this.config,
       summarizationProvider: route.provider,
@@ -180,6 +181,7 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
   }
 
   backgroundRouteConfigured() {
+    if (this.rollingConfig.summaryMode === 'main-fork') return true
     const provider = cleanRouteValue(this.config?.summarizationProvider)
     const model = cleanRouteValue(this.config?.summarizationModel)
     if (provider.length > 0 && model.length > 0) return [{ provider, model }, this.fallbackSummarizationRoute].some(route => routeIsConfigured(route) && this.summaryGuards.canTry(route))
@@ -195,17 +197,17 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
   }
 
   summarizeBackgroundSelection(agent, prepared, signal) {
-    return summarizeAsyncRegion(this, agent, prepared, signal)
+    return this.rollingConfig.summaryMode === 'main-fork' ? summarizeMainFork(this,agent,prepared,signal) : summarizeAsyncRegion(this, agent, prepared, signal)
   }
 
   commitBackgroundSelection(agent, summarized) {
     const result = commitAsyncRegion(this, agent, summarized)
     return result === null ? null : { ...result, rollingPolicy: summarized }
   }
-  summaryRouteFingerprint() { return JSON.stringify([SUMMARY_POLICY_VERSION,this.config.summarizationProvider, this.config.summarizationModel, this.fallbackSummarizationRoute]) }
+  summaryRouteFingerprint() { return JSON.stringify([SUMMARY_POLICY_VERSION,this.rollingConfig?.summaryMode,this.config.summarizationProvider, this.config.summarizationModel, this.fallbackSummarizationRoute]) }
 
   bindBackgroundCancellation(agent, signal) { bindBackgroundCancellation(this,agent,signal) }
-  rescueWithConversation(agent,signal) { return rescueWithConversation(this,agent,signal) }
+  rescueWithConversation(agent,signal) { if (this.rollingConfig.summaryMode === 'main-fork') return null; return rescueWithConversation(this,agent,signal) }
   canPrepareBackground(agent) {
     if(this.controlFile&&!this.config.auto)return false
     if(compactionBusy(agent.session))return false
@@ -240,7 +242,7 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
     const controller = new AbortController()
     const state = { status: 'summarizing', selection, prepared, controller, promise: null, summarized: null, parts,
       recoveryReady: previous?.status === 'ready' && previous.summarized ? previous : undefined,
-      signature: policy.signature, cutoffEnd: previous?.cutoffEnd ?? (selection.activeTokens >= policy.softActiveTokens ? selection.eligibleEnd : undefined), revision:this.controlRevision, generation: this.runtimeGeneration }
+      signature: policy.signature, cutoffEnd: this.rollingConfig.summaryMode === 'main-fork' ? selection.end : previous?.cutoffEnd ?? (selection.activeTokens >= policy.softActiveTokens ? selection.eligibleEnd : undefined), revision:this.controlRevision, generation: this.runtimeGeneration }
     this.backgroundFolds.set(agent, state)
     this.backgroundControllers.add(controller)
     this.compressionReporter.report(agent.session.id, 'summarizing', { ...selection, start: parts[0]?.start ?? selection.start })
@@ -249,12 +251,12 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
       .then(async (summarized) => {
         controller.signal.throwIfAborted()
         if (this.backgroundFolds.get(agent) !== state || currentPolicy(this, agent)?.signature !== state.signature) return
-        const built = await buildDraftTree(this, agent, previous, summarized, controller.signal, suffix)
+        const built = summarized?.mainFork ? {frontier:summarized.forkParts,tree:summarized.preparedTree} : await buildDraftTree(this, agent, previous, summarized, controller.signal, suffix)
         controller.signal.throwIfAborted()
         if (this.backgroundFolds.get(agent) !== state || currentPolicy(this, agent)?.signature !== state.signature) return
-        state.parts = summarized ? [...parts, summarized] : parts
+        state.parts = summarized?.mainFork ? summarized.forkParts : summarized ? [...parts, summarized] : parts
         state.frontier = built.frontier; state.tree = built.tree
-        state.summarized = assembleTree(this, built.frontier, built.tree, state.parts.length)
+        state.summarized = assembleTree(this, built.frontier, built.tree, summarized?.mainFork?summarized.forkLeafCount:state.parts.length)
         state.status = 'ready'
         saveDraft(this, agent, state)
         this.compressionReporter.report(agent.session.id, 'ready', state.summarized)
@@ -411,6 +413,7 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
     if (!policy) return null
     const session = agent.session
     const staged = this.backgroundFolds.get(agent)
+    if (this.rollingConfig.summaryMode === 'main-fork' && staged) return null
     if (staged && staged.status !== 'ready') return null
     if (staged && staged.generation !== this.runtimeGeneration) {
       this.backgroundFolds.delete(agent)
@@ -445,6 +448,7 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
       // prevents newly arriving messages from extending this cycle.
       options.prepareMinimumTokens = staged.cutoffEnd !== undefined ? 1 : policy.pressureFoldTokens
     }
+    if (this.rollingConfig.summaryMode === 'main-fork') options.firstFoldableIndex = systemPrefixEndIndex(session)
     const systemEnd = systemPrefixEndIndex(session), prefixEnd = options.firstFoldableIndex
     if (staged?.parts?.length) {
       const endIndex = session.surface.nodes.indexOf(staged.summarized.end)
@@ -454,7 +458,7 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
       }
       options.firstFoldableIndex = endIndex + 1
     }
-    if (!staged?.parts?.length && prefixEnd > systemEnd) {
+    if (this.rollingConfig.summaryMode !== 'main-fork' && !staged?.parts?.length && prefixEnd > systemEnd) {
       const depths = index => {
         if (index < systemEnd || index >= prefixEnd) return null
         const seq = session.surface.nodes[index]
@@ -467,6 +471,11 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
         isBalancedAfter: seq => toolPairingBalancedAfter(session, seq),
       })
       if (condensed) return condensed
+    }
+    if (this.rollingConfig.summaryMode === 'main-fork') {
+      if (options.activeTokens < (policy.prepareActiveTokens ?? policy.softActiveTokens)) return null
+      options.foldBatchTokens = Number.MAX_SAFE_INTEGER
+      options.prepareMinimumTokens = 1
     }
     const selection = selectRollingRange(priced.nodes, session.surface.nodes, options)
     if (selection) {

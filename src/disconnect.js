@@ -4,16 +4,16 @@ import {createHash,randomUUID} from 'node:crypto'
 import {configFiles,readJson,mcpRegistration,ownMcp,script,definitions} from './harness.js'
 import {findCli,runCommand,commandOptions} from './runtime.js'
 import {claudePlugin} from './claude-plugin.js'
-import {readHermesConfig,removeHermesIntegration} from './hermes-config.js'
 import {applyTakeover} from './takeover.js'
 import {dshSetupPreview} from './dsh-setup.js'
 import {applyDshArchivePlan} from './dsh-summary-setup.js'
+import {readPiPolicy,savePiPolicy} from './pi-compaction-policy.js'
 
 const read=file=>existsSync(file)?readFileSync(file,'utf8'):null
 const hash=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex')
 const active=new Set()
 export function ownHook(command,harness,store) {
-  const word=harness==='codex'?'codex-hook':harness==='hermes'?'hermes-hook':'hook'
+  const word=harness==='codex'?'codex-hook':'hook'
   return typeof command==='string'&&new RegExp('\\b'+word+'\\b').test(command)&&
     [script,join(store.dir,'superlcm.js')].some(path=>command.includes(path))
 }
@@ -40,10 +40,6 @@ export async function disconnectPreview(store,harness,{env=process.env,runComman
   if(harness==='pi') {
     const raw=raws[piFile]
     if(raw!==null&&!raw.startsWith('// SuperLcm for Pi'))blocker='同名 Pi 扩展不属于 SuperLcm，未覆盖'
-  } else if(harness==='hermes') {
-    const c=await readHermesConfig(env)
-    registration={found:!!c.mcp,config:c.mcp}
-    commands=Object.values(c.hooks||{}).flat().map(h=>h.command).filter(c=>ownHook(c,harness,store))
   } else {
     registration=await mcpRegistration(harness,{env,runCommand:run})
     next=withoutHooks(readJson(files.hooks),harness,store)
@@ -74,11 +70,9 @@ export async function applyDisconnect(store,harness,revision,options={}) {
       if(p.plugin?.enabled)await run(findCli('claude',env)||'claude',['plugin','disable',p.plugin.id],commandOptions(env))
     }
     if(harness==='pi') {
+      savePiPolicy(store,{enabled:false,ratio:readPiPolicy(store.dir).ratio})
       if(read(p.piFile)!==p.raws[p.piFile])throw Error('Pi 扩展已变化，未覆盖')
       if(p.raws[p.piFile]!==null)renameSync(p.piFile,join(backup,'superlcm.ts'))
-    } else if(harness==='hermes') {
-      if(read(plan.files.mcp)!==p.raws[plan.files.mcp])throw Error('Hermes 配置已变化，未覆盖')
-      await removeHermesIntegration(env,{removeMcp:ownMcp(p.registration,store),commands:p.commands})
     } else {
       if(ownMcp(p.registration,store)) {
         const current=await mcpRegistration(harness,{env,runCommand:run})
@@ -94,7 +88,7 @@ export async function applyDisconnect(store,harness,revision,options={}) {
       }
     }
     const after=await disconnectPreview(store,harness,options),n=after._next
-    const verified=harness==='pi'?read(n.piFile)===null:harness==='hermes'?!n.registration.found&&!n.commands.length:!n.registration.found&&!n.plugin?.enabled&&JSON.stringify(readJson(after.files.hooks))===JSON.stringify(n.next)
+    const verified=harness==='pi'?read(n.piFile)===null:!n.registration.found&&!n.plugin?.enabled&&JSON.stringify(readJson(after.files.hooks))===JSON.stringify(n.next)
     if(!verified)throw Error('取消接入尚未验证通过；自动归档已暂停，备份位于 '+backup)
     return {harness,disconnected:true,configuration_verified:true,archives_preserved:true,reload_required:true,backup}
   } finally {active.delete(harness)}

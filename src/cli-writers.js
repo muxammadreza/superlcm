@@ -11,11 +11,11 @@ import { summarizeWithClaudeCli } from './claude-cli.js'
 import { summarizeWithCodexCli } from './codex-cli.js'
 import { SUMMARY_SYSTEM, buildSummaryPrompt, checkedSummary } from './summary-policy.js'
 
-export const WRITER_CLI = { 'claude-code': 'claude', codex: 'codex', hermes: 'hermes', pi: 'pi' }
-const ORDER = ['claude-code', 'codex', 'hermes', 'pi']
+export const WRITER_CLI = { 'claude-code': 'claude', codex: 'codex', pi: 'pi' }
+const ORDER = ['claude-code', 'codex', 'pi']
 // The conversation's own tool when its CLI is installed; otherwise (an imported conversation) the first installed one.
 export function writerTool(harness, env = process.env) {
-  if (harness === 'dsh') return null
+  if (harness === 'dsh' || harness === 'hermes') return null
   if (WRITER_CLI[harness] && findCli(WRITER_CLI[harness], env)) return harness
   return ORDER.find(h => findCli(WRITER_CLI[h], env)) || null
 }
@@ -52,16 +52,6 @@ function run(name, bin, args, input, { env, timeoutMs, cwd, spawnProcess, summar
   })
 }
 
-// Hermes: one query from stdin, tagged source "tool" so it stays out of the user's session list.
-export function summarizeWithHermes(text, { model = '', bin = findCli('hermes') || 'hermes', env = process.env, timeoutMs = 180000, cwd = join(home(), 'writer-cwd'), spawnProcess = spawn, summaryTask, signal } = {}) {
-  check('Hermes', text, model, timeoutMs)
-  const args = ['chat', '--query-file', '-', '--format', 'stream-json', '--source', 'tool', '--ignore-rules', '--max-turns', '1', ...(model ? ['-m', model] : [])]
-  return run('Hermes', bin, args, SUMMARY_SYSTEM + '\n\n' + buildSummaryPrompt(text,summaryTask), { env, timeoutMs, cwd, spawnProcess, summaryTask, signal }, out => {
-    const result = out.trim().split('\n').map(line => { try { return JSON.parse(line) } catch { return null } }).findLast(e => e?.type === 'result')
-    if(result?.exit_code || !result) return null
-    return checkedSummary(result.text,{...summaryTask,finishReason:result.finish_reason ?? result.stop_reason,maxChars:summaryTask?.allowOversize?null:6000})
-  })
-}
 // Pi: print mode, no saved session, and no tools, extensions (so not SuperLcm's own), skills or context files.
 export function summarizeWithPi(text, { model = '', bin = findCli('pi') || 'pi', env = process.env, timeoutMs = 180000, cwd = join(home(), 'writer-cwd'), spawnProcess = spawn, summaryTask, signal } = {}) {
   check('Pi', text, model, timeoutMs)
@@ -70,10 +60,10 @@ export function summarizeWithPi(text, { model = '', bin = findCli('pi') || 'pi',
 }
 
 export function summarizeWith(tool, text, { model = '', env = process.env, summaryTask,signal } = {}) {
+  if(!Object.hasOwn(WRITER_CLI,tool))throw new Error('No tool can write summaries on this computer')
   const bin = findCli(WRITER_CLI[tool], env)
   if (tool === 'claude-code') return summarizeWithClaudeCli(text, { model, bin, env, summaryTask,signal })
   if (tool === 'codex') return summarizeWithCodexCli(text, { model, bin, env, summaryTask,signal })
-  if (tool === 'hermes') return summarizeWithHermes(text, { model, bin, env, summaryTask,signal })
   if (tool === 'pi') return summarizeWithPi(text, { model, bin, env, summaryTask,signal })
   throw new Error('No tool can write summaries on this computer')
 }

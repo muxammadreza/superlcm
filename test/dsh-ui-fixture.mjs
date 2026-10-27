@@ -10,7 +10,7 @@ const engine = new CompressionReporter(store.db,{kind:'engine',profile:'web',ena
 const archive = new CompressionReporter(store.db,{kind:'archive',profile:'web',enabled:true,routeReady:true})
 engine.report('native-ui-session','summarizing',{start:0,end:9})
 const version = compressionSnapshot(store).runtimes[0].version
-const harnesses = ['codex','hermes','pi','dsh'].map(harness => ({harness,supported:true,detected:true,configured:true,
+const harnesses = ['codex','pi','dsh'].map(harness => ({harness,supported:true,detected:true,configured:true,
   configuration_matches:true,bin:process.execPath,compression:compressionCapabilities[harness],
   ...(harness === 'dsh' ? {dsh:{profiles:[{profile:'web',configured:true,enabled:true,route_ready:true,
     running:true,state:'enabled',installed_version:version}]}} : {}) }))
