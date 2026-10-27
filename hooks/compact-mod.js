@@ -178,32 +178,55 @@ async function forkSummaries($, id) {
     if (state.claim) try { await settle({ reason: 'error' }) } catch {}
   } finally {
     if (forking.get(id) === state) forking.delete(id)
-    // The fork read the main thread's cache, so its hour starts again now.
-    if (!busy.has(id)) watchIdle($, id)
+    // The fork read the main thread's cache.
+    const watch = idle.get(id)
+    if (watch) watch.touchedAt = Date.now()
   }
 }
-// 缓存过期压缩: the timer runs from the last request that read the main thread's cache (a turn's end, or a
-// fork's), past COLD_IDLE_MS in src/summary-background.js, which `cold-check` then confirms from the transcript.
-const COLD_AFTER_MS = 3750000
+// 缓存过期压缩: `cold-check` (src/summary-background.js) decides from evidence whether the main cache expired:
+// the transcript's last main-thread response and the cache lifetime it wrote, plus every request this module saw
+// billed to the session while it was idle. A $.model.fork (SuperLcm's own, another mod's keep-warm ping, Claude
+// Code's) leaves nothing in the transcript but raises the session's cost, so a rise counts as a read of the main
+// cache at that look. The module looks once a minute and asks `cold-check` only after such a read, or once the
+// cache would have run out.
+const COLD_LOOK_MS = 60000
 const idle = new Map(), coldRuns = new Set()
-function stopIdle(id) { idle.get(id)?.cancel(); idle.delete(id) }
-function watchIdle($, id, ms = COLD_AFTER_MS) {
+function stopIdle(id) { const state = idle.get(id); state?.timer?.cancel(); state?.first?.cancel(); idle.delete(id) }
+function watchIdle($, id, firstMs = 0) {
   stopIdle(id)
   if (ended.has(id) || busy.has(id)) return
-  try { idle.set(id, $.clock.after(ms, () => coldCompact($, id))) } catch {}
-}
-async function coldCompact($, id) {
-  idle.delete(id)
-  if (ended.has(id) || busy.has(id) || forking.has(id) || coldRuns.has(id)) return
+  const state = { timer: null, first: null, cost: null, touchedAt: 0, dueAt: 0, looking: false }
+  idle.set(id, state)
+  // The cost now is the baseline: the turn that just ended is in the transcript.
+  void Promise.resolve().then(() => $.session.usage()).then(u => { if (state.cost === null) state.cost = u?.cost?.usd ?? null }, () => {})
   try {
-    // Summaries still being written go into the packet.
-    await writing.get(id)?.run
+    state.timer = $.clock.every(COLD_LOOK_MS, () => lookIdle($, id, state))
+    if (firstMs) state.first = $.clock.after(firstMs, () => lookIdle($, id, state))
+  } catch { stopIdle(id) }
+}
+async function lookIdle($, id, state) {
+  if (idle.get(id) !== state || state.looking || busy.has(id) || ended.has(id) || forking.has(id) || coldRuns.has(id)) return
+  state.looking = true
+  try {
     const u = await $.session.usage()
-    const due = await cli($, 'cold-check', id, '', { flags: ['--tokens', String(u?.context?.tokens || 0), '--window', String(u?.context?.window || 0)] })
-    if (!due.compact || ended.has(id) || busy.has(id) || forking.has(id)) return
+    const cost = u?.cost?.usd
+    // Without the session's cost no fork can be seen, so nothing shows the cache expired.
+    if (typeof cost !== 'number') return stopIdle(id)
+    if (state.cost !== null && cost > state.cost) state.touchedAt = Date.now()
+    state.cost = cost
+    // Summaries still being written go into the packet; the next look goes on.
+    if (writing.has(id) || (!state.touchedAt && Date.now() < state.dueAt)) return
+    const touched = state.touchedAt
+    const due = await cli($, 'cold-check', id, '', { flags: ['--tokens', String(u.context?.tokens || 0), '--window', String(u.context?.window || 0), ...(touched ? ['--touched', String(touched)] : [])] })
+    if (idle.get(id) !== state) return
+    if (state.touchedAt === touched) state.touchedAt = 0
+    if (due.dueAt) { state.dueAt = due.dueAt; return }
+    if (!due.compact) return stopIdle(id)
+    if (state.touchedAt || busy.has(id) || ended.has(id) || forking.has(id)) return
+    stopIdle(id)
     coldRuns.add(id)
-    await $.command.run({ command: 'compact' })
-  } catch {} finally { coldRuns.delete(id) }
+    try { await $.command.run({ command: 'compact' }) } finally { coldRuns.delete(id) }
+  } catch {} finally { state.looking = false }
 }
 function summaryTick($,id) {
   const now=Date.now()
@@ -264,7 +287,7 @@ export function register(on) {
     // kept and swapped in at the threshold without asking again) is answered too: when the summaries are
     // ready, ours is what gets kept; when they are not, Claude Code prepares its own as usual.
     if (e.agentId) return next(e)
-    // The /compact this module ran after the cache expired (coldCompact).
+    // The /compact this module ran after the cache expired (lookIdle).
     let plan,id,cold=e.trigger==='manual'&&coldRuns.size>0
     try {
       id=await $.session.id()

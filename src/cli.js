@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { visibleOutputRoom, isReducedSummary, reducedNotice, adaptiveSummaryTask, profileKey, readSummaryProfile, updateSummaryProfile } from './summary-generation.js'
 import { compactionDiagnostic } from './compaction-diagnostic.js'
-import { ClaudeStore, claudeTranscript } from './store.js'
+import { ClaudeStore, claudeTranscript, shortCode } from './store.js'
 import { codexTranscript, codexSessionKey } from './codex.js'
 import { nativeConversationName } from './conversation-names.js'
 import { buildHierarchy, summaryWork, summarySettingsRevision } from './summarize.js'
@@ -17,7 +17,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { scheduleSummary, drainSummaryQueue } from './summary-scheduler.js'
 import { enqueueSummaryRun, reserveSummaryRun, bindSummaryRun, progressSummaryRun, finishSummaryRun, activeSummaryRun, summaryConcurrency } from './summary-runs.js'
-import { summaryTick, catchUp, catchupDeadlineMs, pendingLeaves, coldCompactionDue, lastMainResponse, COLD_IDLE_MS } from './summary-background.js'
+import { summaryTick, catchUp, catchupDeadlineMs, pendingLeaves, coldCompactionDue, cacheExpiry, firstTranscript } from './summary-background.js'
 import { claimHostFork, settleHostFork } from './main-fork.js'
 import { randomUUID } from 'node:crypto'
 import {claudeCompactionNodes} from './claude-checkpoints.js'
@@ -248,32 +248,57 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
   const store=new ClaudeStore()
   try {
     const input=JSON.parse(await new Promise((resolve,reject)=>{let text='';process.stdin.setEncoding('utf8');process.stdin.on('data',part=>{text+=part;if(text.length>32e6)reject(new Error('Oversized compaction input'))});process.stdin.on('end',()=>resolve(text))}))
-    const session=rest[0],src=session&&store.source(session),setting=store.takeover()
+    const session=rest[0],setting=store.takeover()
+    // A conversation the Claude app continued under a new ID can compact before any hook recorded it (its
+    // transcript may appear only after SessionStart): record it here, the way the hooks would.
+    if(session&&setting.enabled&&process.env.SUPERLCM_CLI_WORKER!=='1'&&!store.source(session)&&!store.isDeleted(session)&&store.integrationEnabled('claude-code'))try{
+      const found=firstTranscript(session),file=found&&claudeTranscript(found)
+      if(file){
+        store.ingest(session,file)
+        const title=nativeConversationName(store,{harness:'claude-code',id:session,file})
+        store.setMetadata(session,{harness:'claude-code',externalId:session,name:title||derivedTitle(store,session),nameSource:title?'native':'derived'})
+      }
+    }catch{}
+    const src=session&&store.source(session)
     if(!setting.enabled)reply={use:false,reason:'compaction takeover is off'}
     else if(!src||store.isDeleted(session))reply={use:false,reason:'conversation not recorded by SuperLcm'}
     else {
       if(existsSync(src.path))store.ingest(session,src.path) // the newest turns, written since the last hook
       const {planCompaction}=await import('./compaction.js')
       const {verifiedCompactionInput}=await import('./claude-compaction-input.js')
-      const plan=()=>{
+      const plan=(target=session)=>{
         const current=store.takeover()
         if(!current.enabled)return {use:false,reason:'compaction takeover is off'}
         if(current.ratio!=null&&!(input.window>0))return {use:false,reason:'current model capacity unavailable'}
-        const context=verifiedCompactionInput(store,session,input.messages||[])
-        return planCompaction({meta:store.metadata(session),events:context.events,nodes:claudeCompactionNodes(store,session),messages:context.messages,instructions:input.instructions||'',tokens:input.tokens||0,window:current.ratio!=null?(input.window||0)*current.ratio:Math.min(input.window||current.window,current.window),keepTokens:current.keep,trigger:input.trigger})
+        const context=verifiedCompactionInput(store,target,input.messages||[])
+        return planCompaction({meta:store.metadata(target),events:context.events,nodes:claudeCompactionNodes(store,target),messages:context.messages,instructions:input.instructions||'',tokens:input.tokens||0,window:current.ratio!=null?(input.window||0)*current.ratio:Math.min(input.window||current.window,current.window),keepTokens:current.keep,trigger:input.trigger})
       }
       // A compaction after the cache expired that does not happen leaves no record: nothing compacted natively.
-      const note=(result,stage,catchupMs=null)=>input.trigger==='cold'&&!result.use?null:store.noteCompaction(session,{...compactionDiagnostic(result,{nodes:store.nodeRows(session,0),records:store.stats(session).records,before:input.tokens||0,trigger:input.trigger}),stage:stage||(result.stage==='inline'||result.inline?'inline':'first'),pending:pendingLeaves(store,session),after:result.after??null,catchupMs})
+      // Coverage is that of the conversation whose summaries the packet uses (the parent's for stage 'parent').
+      let covered=session
+      const note=(result,stage,catchupMs=null)=>input.trigger==='cold'&&!result.use?null:store.noteCompaction(session,{...compactionDiagnostic(result,{nodes:store.nodeRows(covered,0),records:store.stats(covered).records,before:input.tokens||0,trigger:input.trigger}),stage:stage||(result.stage==='inline'||result.inline?'inline':'first'),pending:pendingLeaves(store,covered),after:result.after??null,catchupMs})
       const notePlan=(result,stage,ms=null)=>{
         if(result.initial){note(result.initial,stage||'first',ms);note(result,'inline',ms)}
         else note(result,stage,ms)
       }
-      // A turn can start between the module's cold-check and this compaction: then the cache is warm again.
-      const cold=input.trigger==='cold',idle=()=>{const last=lastMainResponse(src.path);return !!last&&Date.now()-last.at>=COLD_IDLE_MS}
-      reply=cold&&!idle()?{use:false,reason:'the session was used again after its cache expired'}:plan()
+      // A conversation continued under a new ID opens with its parent's packet and carries the parent's records
+      // after it, uuids included, so the parent's summaries cover them until this one has its own.
+      const parent=()=>{
+        const code=/^\s*<superlcm-context conversation="#([0-9a-f]{5})"/.exec(input.messages?.[0]?.text||'')?.[1]
+        if(!code||code===shortCode(session))return null
+        const found=store.db.prepare('SELECT session FROM sources').all().map(r=>r.session).filter(s=>shortCode(s)===code&&!store.isDeleted(s))
+        return found.length===1&&store.metadata(found[0]).harness==='claude-code'?found[0]:null
+      }
+      // A request can read the cache between the module's cold-check and this compaction: then it is warm again.
+      const cold=input.trigger==='cold',cache=cold?cacheExpiry(store,session):null,expired=!!cache&&Date.now()>=cache.expiresAt
+      reply=cold&&!expired?{use:false,reason:'the session was used again after its cache expired'}:plan()
+      let stage=input.afterCatchup?'catchup':null
+      if(!reply.use&&!reply.ambiguous&&(!cold||expired)){const from=parent(),inherited=from&&plan(from);if(inherited?.use){reply=inherited;stage='parent';covered=from}}
       // After the cache expired, compacting pays only when the packet is at most half of what would be re-cached.
       if(cold&&reply.use&&reply.after>(input.tokens||0)*.5)reply={use:false,reason:'a compaction after the cache expired would not halve the context'}
-      notePlan(reply,input.afterCatchup?'catchup':null,input.afterCatchup&&Number.isFinite(input.catchupMs)?input.catchupMs:null)
+      // One SuperLcm declines is not tried again until the next main-thread response.
+      if(cold&&expired&&!reply.use)store.noteColdTried(session,cache.at)
+      notePlan(reply,stage,input.afterCatchup&&Number.isFinite(input.catchupMs)?input.catchupMs:null)
       const eligible=['coverage_lag','uncovered_oldest','no_summaries','context_too_large'].includes(compactionDiagnostic(reply).code)
       const chosen=effective(store,session),harness=store.metadata(session).harness
       // One after the cache expired schedules nothing: it is skipped, not handed to Claude Code.
@@ -324,7 +349,8 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
   const store=new ClaudeStore()
   let reply
   const flag=name=>{const at=rest.indexOf(name),n=at<0?0:Number(rest[at+1]);return Number.isSafeInteger(n)&&n>0?n:0}
-  try{reply=rest[0]&&store.source(rest[0])?coldCompactionDue(store,rest[0],{tokens:flag('--tokens'),window:flag('--window')}):{none:'not recorded'}}catch{reply={none:'check failed'}}
+  // --touched: the module saw a request billed to the session that may have read the main cache.
+  try{reply=rest[0]&&store.source(rest[0])?coldCompactionDue(store,rest[0],{tokens:flag('--tokens'),window:flag('--window'),touched:flag('--touched')}):{none:'not recorded'}}catch{reply={none:'check failed'}}
   finally{store.close()}
   process.stdout.write(JSON.stringify(reply)+'\n')
 } else if (command==='fork-claim'||command==='fork-settle') {

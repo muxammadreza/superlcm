@@ -264,7 +264,7 @@ export class ClaudeStore {
     this.db.exec('SAVEPOINT compaction_note')
     try {
       this.db.prepare('INSERT INTO compaction_diagnostics VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(session) DO UPDATE SET status=excluded.status,code=excluded.code,reason=excluded.reason,at_ms=excluded.at_ms,through_record=excluded.through_record,records=excluded.records,before_tokens=excluded.before_tokens,trigger=excluded.trigger').run(session,status,code,reason,at,through,records,number(before)||0,safeTrigger)
-      this.db.prepare('INSERT INTO compaction_history VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(session,at,status,code,reason,['first','inline','catchup'].includes(stage)?stage:'first',through,records,number(coverage_lag)??Math.max(0,records-1-through),number(pending),number(before)||0,number(after),number(catchup_ms),safeTrigger)
+      this.db.prepare('INSERT INTO compaction_history VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(session,at,status,code,reason,['first','inline','catchup','parent'].includes(stage)?stage:'first',through,records,number(coverage_lag)??Math.max(0,records-1-through),number(pending),number(before)||0,number(after),number(catchup_ms),safeTrigger)
       this.db.prepare('DELETE FROM compaction_history WHERE session=? AND rowid NOT IN (SELECT rowid FROM compaction_history WHERE session=? ORDER BY at_ms DESC,rowid DESC LIMIT 50)').run(session,session)
       this.db.exec('RELEASE compaction_note')
     } catch(error){this.db.exec('ROLLBACK TO compaction_note');this.db.exec('RELEASE compaction_note');throw error}
@@ -282,6 +282,12 @@ export class ClaudeStore {
     return {total,takeover,native,rate:total?takeover/total:null,recent}
   }
   reducedSummaryCount(session) { return this.db.prepare("SELECT count(*) AS n FROM nodes WHERE session=? AND instr(summary,'[SuperLcm reduced navigation]')>0").get(session).n }
+  // 缓存过期压缩 (src/summary-background.js): the last request outside the transcript that may have read the
+  // main cache (a fork, another mod's keep-warm ping), and the main response a skipped compaction followed.
+  #cacheTouches() { this.db.exec('CREATE TABLE IF NOT EXISTS cache_touches(session TEXT PRIMARY KEY,at_ms INTEGER NOT NULL DEFAULT 0,tried_ms INTEGER)') }
+  noteCacheTouch(session,at) { if(!Number.isSafeInteger(at)||at<=0)return;this.#cacheTouches();this.db.prepare('INSERT INTO cache_touches(session,at_ms) VALUES(?,?) ON CONFLICT(session) DO UPDATE SET at_ms=MAX(at_ms,excluded.at_ms)').run(session,at) }
+  noteColdTried(session,responseAt) { if(!Number.isSafeInteger(responseAt))return;this.#cacheTouches();this.db.prepare('INSERT INTO cache_touches(session,tried_ms) VALUES(?,?) ON CONFLICT(session) DO UPDATE SET tried_ms=excluded.tried_ms').run(session,responseAt) }
+  cacheTouch(session) { this.#cacheTouches();const r=this.db.prepare('SELECT at_ms,tried_ms FROM cache_touches WHERE session=?').get(session);return r?{at:r.at_ms,tried:r.tried_ms}:null }
   noteTakeover(session,before,after) { this.db.prepare('INSERT INTO takeover_runs(session,at_ms,before,after) VALUES(?,?,?,?) ON CONFLICT(session) DO UPDATE SET at_ms=excluded.at_ms,before=excluded.before,after=excluded.after').run(session,Date.now(),Math.round(before)||0,Math.round(after)||0) }
   takeTakeover(session,maxAge=3600000) { const r=this.db.prepare('SELECT at_ms,before,after FROM takeover_runs WHERE session=?').get(session); this.db.prepare('DELETE FROM takeover_runs WHERE session=?').run(session); return r&&Date.now()-r.at_ms<=maxAge?{before:r.before,after:r.after}:null }
   markCompaction(session,ordinal=this.stats(session).records) { if(this.source(session))this.db.prepare('INSERT OR IGNORE INTO compactions(session,ordinal) VALUES(?,?)').run(session,ordinal) }

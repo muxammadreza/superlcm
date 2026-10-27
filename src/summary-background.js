@@ -7,12 +7,17 @@ import {summarizeWith,writerTool,WRITER_CLI} from './cli-writers.js'
 import {scheduleSummary,mainForkDue} from './summary-scheduler.js'
 import {RECENT_CHARS} from './compaction.js'
 
-// 缓存过期压缩: Claude Code keeps the main thread's prompt cache for an hour after its last request. Past that,
-// the next prompt writes the whole context to the cache again, so a takeover compaction then costs no cache:
-// only the smaller packet is written. It is worth it from COLD_SHARE of the compaction window.
-export const COLD_IDLE_MS=3600000+120000, COLD_SHARE=.4
-// The newest main-thread response in a transcript (rows may be appended out of order around a compaction),
-// its context size, and whether a compaction followed it.
+// 缓存过期压缩: a prompt cache lives for its lifetime (1h or 5m) after the last request that read or wrote it.
+// Past that, the next prompt writes the whole context to the cache again, so a takeover compaction then costs no
+// cache: only the smaller packet is written. It is worth it from COLD_SHARE of the compaction window.
+// Expiry is decided from evidence, never from a timer alone: the last main-thread response in the transcript, the
+// lifetime its cache writes used, and every other request the module saw billed to the session (a fork by
+// SuperLcm or another mod, such as a keep-warm ping; see hooks/compact-mod.js), saved with noteCacheTouch.
+export const COLD_SHARE=.4, COLD_MARGIN_MS=120000
+const HOUR=3600000,FIVE_MINUTES=300000
+// The newest main-thread response in a transcript (rows may be appended out of order around a compaction), its
+// context size, whether a compaction followed it, and the longest cache lifetime its responses wrote: a turn that
+// writes only 5-minute entries leaves a prefix cached for an hour.
 export function lastMainResponse(file,{tailBytes=4*1024*1024}={}) {
  let text
  try{
@@ -20,7 +25,7 @@ export function lastMainResponse(file,{tailBytes=4*1024*1024}={}) {
   try{const size=fstatSync(fd).size,start=Math.max(0,size-tailBytes),buf=Buffer.alloc(size-start);readSync(fd,buf,0,buf.length,start);text=buf.toString('utf8')}
   finally{closeSync(fd)}
  }catch{return null}
- let at=0,tokens=0,boundary=0
+ let at=0,tokens=0,boundary=0,ttl=null
  for(const line of text.split('\n')){
   if(!line.includes('"assistant"')&&!line.includes('compact_boundary'))continue
   let r;try{r=JSON.parse(line)}catch{continue}
@@ -28,22 +33,36 @@ export function lastMainResponse(file,{tailBytes=4*1024*1024}={}) {
   if(r.isSidechain||!Number.isFinite(ms))continue
   if(r.type==='system'&&r.subtype==='compact_boundary'){boundary=Math.max(boundary,ms);continue}
   let u=r.type==='assistant'&&r.message?.model!=='<synthetic>'?r.message?.usage:null
-  if(!u||ms<at)continue
+  if(!u)continue
   const sum=x=>(x.input_tokens||0)+(x.cache_read_input_tokens||0)+(x.cache_creation_input_tokens||0)
   if(!sum(u)&&Array.isArray(u.iterations)&&u.iterations.length)u=u.iterations.at(-1)
+  const wrote=u.cache_creation||{}
+  if(wrote.ephemeral_1h_input_tokens>0)ttl=HOUR
+  else if(wrote.ephemeral_5m_input_tokens>0)ttl??=FIVE_MINUTES
+  if(ms<at)continue
   at=ms;tokens=sum(u)+(u.output_tokens||0)
  }
- return at?{at,tokens,compactedSince:boundary>at}:null
+ return at?{at,tokens,compactedSince:boundary>at,ttl}:null
 }
-export function coldCompactionDue(store,id,{env=process.env,tokens=0,window=0,now=Date.now()}={}) {
+// When this session's main cache was last read, its lifetime, and when it runs out.
+export function cacheExpiry(store,id) {
+ const file=store.source(id)?.path,last=file&&lastMainResponse(file)
+ if(!last)return null
+ const seen=store.cacheTouch(id),touched=Math.max(last.at,seen?.at||0),ttl=last.ttl||HOUR
+ return {...last,touched,ttl,expiresAt:touched+ttl+COLD_MARGIN_MS,tried:seen?.tried===last.at}
+}
+export function coldCompactionDue(store,id,{env=process.env,tokens=0,window=0,touched=0,now=Date.now()}={}) {
  if(env.SUPERLCM_CLI_WORKER==='1'||!store.integrationEnabled('claude-code')||store.isDeleted(id)||store.metadata(id).harness!=='claude-code')return {none:'disabled'}
- const takeover=store.takeover(),file=store.source(id)?.path
+ const takeover=store.takeover()
  if(!takeover.enabled)return {none:'takeover off'}
- const last=file&&lastMainResponse(file)
- if(!last)return {none:'no response yet'}
- if(last.compactedSince)return {none:'already compacted'}
- if(now-last.at<COLD_IDLE_MS)return {none:'cache still warm'}
- const limit=takeover.ratio!=null&&window>0?window*takeover.ratio:Math.min(window||takeover.window,takeover.window),size=Math.max(tokens,last.tokens)
+ if(touched>0)store.noteCacheTouch(id,Math.min(touched,now))
+ const cache=cacheExpiry(store,id)
+ if(!cache)return {none:'no response yet'}
+ if(cache.compactedSince)return {none:'already compacted'}
+ // One that SuperLcm skipped is not tried again until the session is used again.
+ if(cache.tried)return {none:'already tried'}
+ if(now<cache.expiresAt)return {none:'cache still warm',dueAt:cache.expiresAt,ttl:cache.ttl}
+ const limit=takeover.ratio!=null&&window>0?window*takeover.ratio:Math.min(window||takeover.window,takeover.window),size=Math.max(tokens,cache.tokens)
  return size>=limit*COLD_SHARE?{compact:true,tokens:size}:{none:'context small'}
 }
 
@@ -66,7 +85,7 @@ export function generateBackground(store,session,setting,options={}) {
 }
 // The first step can precede any Stop hook and even the first persisted prompt.
 // Resolve only the main transcript with this exact ID under the native config root.
-function firstTranscript(id,env) {
+export function firstTranscript(id,env=process.env) {
  if(!/^[a-zA-Z0-9_-]{1,200}$/.test(id))return null
  const root=join(env.CLAUDE_CONFIG_DIR||join(homedir(),'.claude'),'projects'),found=[]
  if(!existsSync(root))return null
