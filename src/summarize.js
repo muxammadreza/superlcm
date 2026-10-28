@@ -238,7 +238,7 @@ export function summarySettingsRevision(store, session, env = process.env) {
   const setting = store.effectiveSetting(session, env)
   return hash(JSON.stringify([setting,store.tuning(),store.integrationRevision(setting.harness),setting.mode==='main-fork'&&setting.harness==='claude-code'?store.takeover():null, setting.mode === 'api' ? store.apiCredential(session, env) : null]))
 }
-export async function buildHierarchy(store, session, { model, apiKey, baseURL, apiURL, apiProvider, effort = null, batchSize = segmentMessages(), targetChars, targetTokens, fanout = store.tuning().fanout, summarize = summarizeWithModel, fetchImpl, shouldContinue = null, leaseDurationMs = 330000, leaseHeartbeatMs = 30000, retryFailed = false, leafOnly = false, maxPieces = Infinity, signal, runId = null } = {}) {
+export async function buildHierarchy(store, session, { model, apiKey, baseURL, apiURL, apiProvider, effort = null, fallbacks = [], batchSize = segmentMessages(), targetChars, targetTokens, fanout = store.tuning().fanout, summarize = summarizeWithModel, fetchImpl, shouldContinue = null, leaseDurationMs = 330000, leaseHeartbeatMs = 30000, retryFailed = false, leafOnly = false, maxPieces = Infinity, signal, runId = null } = {}) {
   if (!model || (apiKey == null && summarize === summarizeWithModel)) throw new Error('Explicit summarizer model and API key required')
   if (!Number.isSafeInteger(batchSize) || batchSize < 2 || batchSize > 10000) throw new Error('batchSize must be 2–10000')
   if (!Number.isSafeInteger(fanout) || fanout < 2 || fanout > 8) throw new Error('fanout must be 2–8')
@@ -258,6 +258,7 @@ export async function buildHierarchy(store, session, { model, apiKey, baseURL, a
   const mayContinue=()=>runs.summaryRunOwns(store,runId,owner)&&(shouldContinue?shouldContinue():summarySettingsRevision(store,session)===revision)
   if (!store.lease(session, leaseDurationMs, owner)){runs.finishSummaryRun(store,runId,{owner,state:'stopped',reason:'busy'});return { session, busy:true }}
   let created = 0
+  const cooldown=new Map()
   let lostLease = false, activeWork = null, outcome='done',stopReason=null,failure=null
   const checkLease = () => { signal?.throwIfAborted(); if (lostLease || !store.ownsLease(session, owner)) throw new Error('Summary writer lost its lease; result not saved') }
   const timer = setInterval(() => {
@@ -285,13 +286,27 @@ export async function buildHierarchy(store, session, { model, apiKey, baseURL, a
         if(!mayContinue())throw Error('Summary setting changed; additional generation cancelled')
         return summarize(content,{...options,summaryTask:{...options.summaryTask,repairDraft}})
       }
-      let summary = summarize===summarizeWithModel ? await summarize(work.content,options) : await fitSummary(await generateCli(work.content),draft=>generateCli(draft,true),{task,onOvershoot:overshoot=>updateSummaryProfile(cliKey,{overshoot},store)})
+      let summary, usedModel=model
+      if(summarize===summarizeWithModel&&fallbacks.length){
+        const chain=[{model,apiKey,apiURL,apiProvider,effort},...fallbacks.map(({id:_,...entry})=>entry)],available=chain.map((entry,i)=>({entry,i})).filter(({i})=>(cooldown.get(i)||0)<=Date.now())
+        let firstError
+        for(const {entry,i} of available.length?available:chain.map((entry,i)=>({entry,i}))){
+          try{summary=await summarize(work.content,{...options,...entry,baseURL:i===0?baseURL:undefined});usedModel=entry.model;break}
+          catch(error){
+            const kind=classifySummaryError(error)
+            if(signal?.aborted||lostLease||!store.ownsLease(session,owner)||!mayContinue()||kind==='cancelled'||kind==='worker_lost')throw error
+            if(!firstError)firstError=error
+            if(['rate_limit','quota','upstream','timeout','transport'].includes(kind))cooldown.set(i,Date.now()+60000)
+          }
+        }
+        if(firstError&&summary===undefined)throw firstError
+      }else summary = summarize===summarizeWithModel ? await summarize(work.content,options) : await fitSummary(await generateCli(work.content),draft=>generateCli(draft,true),{task,onOvershoot:overshoot=>updateSummaryProfile(cliKey,{overshoot},store)})
       summary=checkedSummary(summary,{...work,maxChars:6000})
       if(work.reducedSources&&!isReducedSummary(summary))summary=checkedSummary(summary.slice(0,5500)+'\n\n'+reducedNotice(work))
       checkLease()
       if (!mayContinue()){outcome='stopped';stopReason='settings-changed';return { session, created, stopped:stopReason }}
       verify()
-      store.addNode({ session, id: work.batch_id, level: work.level, first: work.first, last: work.last, children: work.children, summary, digest: work.digest, model,sourceRecords:work.source_records }, { leaseOwner: owner,validate:mayContinue })
+      store.addNode({ session, id: work.batch_id, level: work.level, first: work.first, last: work.last, children: work.children, summary, digest: work.digest, model:usedModel,sourceRecords:work.source_records }, { leaseOwner: owner,validate:mayContinue })
       if (!store.renewLease(session, leaseDurationMs, owner)) throw new Error('Summary writer lost its lease')
       store.completeSummaryBatch(session,work.batch_id,revision)
       activeWork=null

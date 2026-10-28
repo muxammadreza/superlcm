@@ -4,6 +4,7 @@ const LANGS = {
   // Keys that need context to disambiguate; Chinese shows the short form.
   zh: { '关闭（摘要方式）': '关闭' },
   en: {
+    '备用模型': 'Fallback models', '+ 添加备用模型…': '+ Add fallback model…', '主模型被限流、过载、超时或出错时，依次改用这些模型写同一段摘要。': 'When the main model is rate limited, overloaded, times out or fails, these models write the same piece, in this order.', '上移': 'Move up', '移除': 'Remove',
     "压缩设置已变化，请重新读取后保存": "Compaction settings changed. Reload them before saving.",
     "所有工具共用这份粒度设置。只影响之后新生成的摘要，已有摘要保持不变。": "All tools share these granularity settings. They apply to new summaries only; existing summaries stay unchanged.",
     "最近原文保留量必须在 5K 到 200K 之间": "Keep recent originals must be between 5K and 200K tokens.",

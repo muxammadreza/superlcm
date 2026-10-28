@@ -78,7 +78,7 @@ export function flushUnderPressure(store,id,{env=process.env,tokens=0,window=0}=
 
 export function generateBackground(store,session,setting,options={}) {
  const {mode,model,api_provider,api_url,effort,api_effort,oneOffApi}=setting
- if(mode==='api')return buildHierarchy(store,session,{model:model||process.env.SUPERLCM_CLAUDE_MODEL,apiKey:oneOffApi?oneOffApi.apiKey:store.apiCredential(session),apiProvider:api_provider||'anthropic',apiURL:api_url||process.env.SUPERLCM_CLAUDE_API_URL,effort:effort||api_effort||null,...options})
+ if(mode==='api')return buildHierarchy(store,session,{model:model||process.env.SUPERLCM_CLAUDE_MODEL,apiKey:oneOffApi?oneOffApi.apiKey:store.apiCredential(session),apiProvider:api_provider||'anthropic',apiURL:api_url||process.env.SUPERLCM_CLAUDE_API_URL,effort:effort||api_effort||null,fallbacks:oneOffApi?[]:store.apiFallbacks(session),...options})
  const tool=writerTool(store.metadata(session).harness)
  if(!tool)throw Error('No installed tool can write summaries')
  const chosen=model||(tool==='claude-code'?process.env.SUPERLCM_CLAUDE_CLI_MODEL:tool==='codex'?process.env.SUPERLCM_CODEX_CLI_MODEL:'')||''
