@@ -5,6 +5,7 @@ import {estimateSummaryTokens} from './summary-tokens.js'
 import {summarySettingsRevision} from './summarize.js'
 import {forkHash,forkAnchors,forkTreePlan,forkDirective,parseForkTree} from './fork-summary.js'
 import {summarizeNativeFork} from './native-fork.js'
+import {claudeCompactAt} from './takeover.js'
 import {bindSummaryRun,finishSummaryRun,progressSummaryRun,summaryRunOwns,enqueueSummaryRun,reserveSummaryRun,recoverSummaryRuns,summaryConcurrency} from './summary-runs.js'
 
 export function nativeContextUsage(store,session,provided={}){
@@ -20,9 +21,10 @@ export function nativeContextUsage(store,session,provided={}){
   }
   return {tokens:0,window:0}
 }
-export function forkPreparationThreshold(store,session,window){
+export function forkPreparationThreshold(store,session,window,env=process.env){
   const policy=store.takeover()
-  if(store.metadata(session).harness==='claude-code'&&policy.ratio!=null)return window*Math.round((policy.ratio-.1)*1e12)/1e12
+  // Ten points before where Claude Code compacts (its window may be capped below the model's).
+  if(store.metadata(session).harness==='claude-code'&&policy.ratio!=null)return claudeCompactAt({...policy,ratio:Math.round((policy.ratio-.1)*1e12)/1e12},window,env)
   return store.metadata(session).harness==='claude-code'&&policy.enabled?Math.min(window*.7,policy.window*.7/.8):window*.7
 }
 function anchor(raw){

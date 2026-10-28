@@ -6,6 +6,7 @@ import {buildHierarchy,summarySettingsRevision,summaryEstimate,summaryWork} from
 import {summarizeWith,writerTool,WRITER_CLI} from './cli-writers.js'
 import {scheduleSummary,mainForkDue} from './summary-scheduler.js'
 import {RECENT_CHARS} from './compaction.js'
+import {claudeCompactAt} from './takeover.js'
 
 // 缓存过期压缩: a prompt cache lives for its lifetime (1h or 5m) after the last request that read or wrote it.
 // Past that, the next prompt writes the whole context to the cache again, so a takeover compaction then costs no
@@ -62,12 +63,12 @@ export function coldCompactionDue(store,id,{env=process.env,tokens=0,window=0,to
  // One that SuperLcm skipped is not tried again until the session is used again.
  if(cache.tried)return {none:'already tried'}
  if(now<cache.expiresAt)return {none:'cache still warm',dueAt:cache.expiresAt,ttl:cache.ttl}
- const limit=takeover.ratio!=null&&window>0?window*takeover.ratio:Math.min(window||takeover.window,takeover.window),size=Math.max(tokens,cache.tokens)
+ const limit=claudeCompactAt(takeover,window,env),size=Math.max(tokens,cache.tokens)
  return size>=limit*COLD_SHARE?{compact:true,tokens:size}:{none:'context small'}
 }
 
-export function flushUnderPressure(store,id,{tokens=0,window=0}={}) {
- const takeover=store.takeover(),limit=Math.min(window||takeover.window,takeover.window)
+export function flushUnderPressure(store,id,{env=process.env,tokens=0,window=0}={}) {
+ const takeover=store.takeover(),limit=claudeCompactAt(takeover,window,env)
  if(!takeover.enabled||!Number.isFinite(tokens)||tokens<limit*.5)return false
  const estimate=summaryEstimate(store,id)
  if(estimate.segments||estimate.tail_chars<RECENT_CHARS/2)return false
@@ -104,7 +105,7 @@ export function summaryTick(store,id,{env=process.env,spawnProcess,tokens=0,wind
  if(!source)store.setMetadata(id,{harness:'claude-code',externalId:id})
  const setting=store.effectiveSetting(id,env),{mode,model}=setting
  if(['off','cli','api','main-fork'].includes(mode))store.setSummaryMode(id,mode)
- if(['cli','api'].includes(mode))flushUnderPressure(store,id,{tokens,window})
+ if(['cli','api'].includes(mode))flushUnderPressure(store,id,{env,tokens,window})
  if(mode==='main-fork'&&fork){
   store.setHostForker(id,true)
   return mainForkDue(store,id,{env,tokens,window})&&!store.summarizing(id)?{fork:true}:{none:'no eligible work'}

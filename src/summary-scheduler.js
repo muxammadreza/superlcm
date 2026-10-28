@@ -71,7 +71,7 @@ export function drainSummaryQueue(store,{env=process.env,spawnProcess=spawn}={})
 export function mainForkDue(store,session,{env=process.env,tokens=0,window=0}={}) {
   if(env.SUPERLCM_CLI_WORKER==='1'||!['claude-code','codex'].includes(store.metadata(session).harness))return false
   const usage=nativeContextUsage(store,session,{tokens,window})
-  return !!usage.window&&usage.tokens>=forkPreparationThreshold(store,session,usage.window)
+  return !!usage.window&&usage.tokens>=forkPreparationThreshold(store,session,usage.window,env)
 }
 // Only live, settled turns call this; imports and startup replay never do.
 // handoff: the module's own fork could not run, so the separate `claude --resume` branch may.

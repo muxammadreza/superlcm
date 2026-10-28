@@ -21,6 +21,7 @@ import { summaryTick, catchUp, catchupDeadlineMs, pendingLeaves, coldCompactionD
 import { claimHostFork, settleHostFork } from './main-fork.js'
 import { randomUUID } from 'node:crypto'
 import {claudeCompactionNodes} from './claude-checkpoints.js'
+import {claudeCompactAt} from './takeover.js'
 import {hostDraft,retainHostDraft,hostSavedReceipt} from './claude-host-drafts.js'
 const [command,...rest]=process.argv.slice(2)
 const homeFlag=rest.indexOf('--home')
@@ -271,7 +272,10 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
         if(!current.enabled)return {use:false,reason:'compaction takeover is off'}
         if(current.ratio!=null&&!(input.window>0))return {use:false,reason:'current model capacity unavailable'}
         const context=verifiedCompactionInput(store,target,input.messages||[])
-        return planCompaction({meta:store.metadata(target),events:context.events,nodes:claudeCompactionNodes(store,target),messages:context.messages,instructions:input.instructions||'',tokens:input.tokens||0,window:current.ratio!=null?(input.window||0)*current.ratio:Math.min(input.window||current.window,current.window),keepTokens:current.keep,trigger:input.trigger})
+        // Sizes are planned against where Claude Code compacts. An automatic compaction starts there, so the context
+        // now bounds it whatever the settings say: a packet planned for a larger window would compact again at once.
+        const at=claudeCompactAt(current,input.window||0),window=input.trigger==='auto'&&input.tokens>0?Math.min(at,input.tokens):at
+        return planCompaction({meta:store.metadata(target),events:context.events,nodes:claudeCompactionNodes(store,target),messages:context.messages,instructions:input.instructions||'',tokens:input.tokens||0,window,keepTokens:current.keep,trigger:input.trigger})
       }
       // A compaction after the cache expired that does not happen leaves no record: nothing compacted natively.
       // Coverage is that of the conversation whose summaries the packet uses (the parent's for stage 'parent').
