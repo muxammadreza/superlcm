@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.2 — 2026-10-28
+
+- Fix Claude Code takeover compacting again seconds after a compaction, so the context stayed full. In ratio mode the compaction module reports the model's whole capacity (1M), and the packet was sized for 80% of it (800K), leaving about 200K. Claude Code also applies `autoCompactWindow`, so with 300K it compacts at (300K − 20K) × 80% = 224K: one recorded session compacted three times in 30 seconds, each time from about 225K to 217K. The compaction packet, the flush under context pressure, the idle cold-compaction check and the main-fork preparation point now all use the threshold Claude Code really compacts at, and an automatic compaction is also bounded by the context's current size.
+- Add ordered fallback models to the custom-API summary writer. A tool's card lists up to 5 other saved models; when a piece fails (rate limit, quota, overload, timeout, transport error or a broken answer) the next model writes the same piece, and a model that was rate limited or overloaded is skipped for 60 seconds. Each summary records the model that wrote it. Deleting a model removes it from every list.
+- Fix a session opened before an update pointing `~/.superlcm-claude/superlcm.js`, and with it the console and connected tools, back at its older plugin copy. The entry is left alone while it points at a newer installed copy.
+
 ## 0.6.1 — 2026-10-27
 
 - Compact idle Claude Code conversations after their prompt cache expires. Past the cache's lifetime the next prompt writes the whole context to the cache again, so a takeover compaction then costs no cache, only the smaller packet. Expiry is decided from evidence, not a fixed timer: the transcript's last main-thread response, the longest cache lifetime its responses wrote (1 hour or 5 minutes), and every request the compaction module sees billed to the session while it is idle. A `$.model.fork` (SuperLcm's, Claude Code's, or another mod's keep-warm ping) never shows in the transcript but raises the session's cost, so any rise counts as a read of the cache and keeps it warm. The module compacts only when the context is at least 40% of the takeover window and the packet at least halves it. A compaction SuperLcm cannot answer then is skipped, never handed to Claude Code, and not tried again until the next response. It never runs in SuperLcm's own workers.
