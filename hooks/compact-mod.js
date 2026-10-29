@@ -12,6 +12,10 @@ import {rescueClaude,discardClaudeRescue} from './claude-rescue.js'
 // idle longer writes its whole context to the cache again on the next prompt, so the module compacts it
 // first with /compact ($.command.run, answered by this module's session.compact like a manual one) and
 // only the smaller packet is written. One SuperLcm cannot answer is skipped, never handed to Claude Code.
+// 回合末压缩: a takeover inside a turn shows its packet in the Claude app as if the person typed it (Claude Code
+// streams a module's packet as a plain user message; a /compact goes out as a replay, which the app does not
+// draw). So when the next turn would likely cross the threshold, the module compacts at the end of this one with
+// /compact, the same way. One still needed inside a turn is answered by the takeover as before.
 // 本工具后台写: throttled steps and completed turns write waiting pieces with $.model.complete, on the
 // session's own login and without starting another Claude Code; the turn does not wait for it. What is left
 // when the session ends, or after a failed call, goes to the separate `claude -p` worker as before.
@@ -190,7 +194,8 @@ async function forkSummaries($, id) {
 // cache at that look. The module looks once a minute and asks `cold-check` only after such a read, or once the
 // cache would have run out.
 const COLD_LOOK_MS = 60000
-const idle = new Map(), coldRuns = new Set()
+// ownRuns: the /compact this module is running for a session ('cold' or 'turn-end').
+const idle = new Map(), ownRuns = new Map()
 function stopIdle(id) { const state = idle.get(id); state?.timer?.cancel(); state?.first?.cancel(); idle.delete(id) }
 function watchIdle($, id, firstMs = 0) {
   stopIdle(id)
@@ -205,7 +210,7 @@ function watchIdle($, id, firstMs = 0) {
   } catch { stopIdle(id) }
 }
 async function lookIdle($, id, state) {
-  if (idle.get(id) !== state || state.looking || busy.has(id) || ended.has(id) || forking.has(id) || coldRuns.has(id)) return
+  if (idle.get(id) !== state || state.looking || busy.has(id) || ended.has(id) || forking.has(id) || ownRuns.has(id) || ending.has(id)) return
   state.looking = true
   try {
     const u = await $.session.usage()
@@ -224,9 +229,27 @@ async function lookIdle($, id, state) {
     if (!due.compact) return stopIdle(id)
     if (state.touchedAt || busy.has(id) || ended.has(id) || forking.has(id)) return
     stopIdle(id)
-    coldRuns.add(id)
-    try { await $.command.run({ command: 'compact' }) } finally { coldRuns.delete(id) }
+    ownRuns.set(id, 'cold')
+    try { await $.command.run({ command: 'compact' }) } finally { ownRuns.delete(id) }
   } catch {} finally { state.looking = false }
+}
+// 回合末压缩: `end-check` (src/summary-background.js) decides from the context now and what this turn added. A dry
+// run of the packet comes first: a /compact SuperLcm then declines would show the person a skipped compaction.
+const turnStart = new Map(), ending = new Set()
+async function compactAtTurnEnd($, id) {
+  const stale = () => busy.has(id) || ended.has(id) || forking.has(id) || ownRuns.has(id)
+  if (stale() || ending.has(id)) return
+  ending.add(id)
+  try {
+    const u = await $.session.usage(), tokens = u?.context?.tokens || 0, start = turnStart.get(id)
+    const grew = typeof start === 'number' ? Math.max(0, tokens - start) : 0
+    const due = await cli($, 'end-check', id, '', { flags: ['--tokens', String(tokens), '--window', String(u?.context?.window || 0), '--grew', String(grew)] })
+    if (!due.compact || stale()) return
+    const plan = await packet($, id, await $.session.messages(), '', 'turn-end', { dry: true })
+    if (!plan?.use || stale()) return
+    ownRuns.set(id, 'turn-end')
+    try { await $.command.run({ command: 'compact' }) } finally { ownRuns.delete(id) }
+  } catch {} finally { ending.delete(id) }
 }
 function summaryTick($,id) {
   const now=Date.now()
@@ -258,11 +281,15 @@ export function register(on) {
     return next(e)
   })
   on('turn.start', async ($, e, next) => {
-    if (!e.agentId) Promise.resolve().then(() => $.session.id()).then(id => { busy.add(id); stopIdle(id) }).catch(() => {})
+    if (!e.agentId) Promise.resolve().then(() => $.session.id()).then(id => {
+      busy.add(id); stopIdle(id); turnStart.delete(id)
+      return Promise.resolve().then(() => $.session.usage()).then(u => { if (busy.has(id) && typeof u?.context?.tokens === 'number') turnStart.set(id, u.context.tokens) })
+    }).catch(() => {})
     return next(e)
   })
   on('turn.complete', async ($, e, next) => {
-    if (!e.agentId) $.session.id().then(id => { busy.delete(id); watchIdle($, id); return writeSummaries($, id) }).catch(() => {})
+    // The summaries this turn left go into the packet, so the turn-end check waits for them.
+    if (!e.agentId) $.session.id().then(id => { busy.delete(id); watchIdle($, id); return writeSummaries($, id).catch(() => {}).then(() => compactAtTurnEnd($, id)) }).catch(() => {})
     return next(e)
   })
   on('turn.step', async function* ($, e, next) {
@@ -275,7 +302,7 @@ export function register(on) {
       const id=await $.session.id(),state=writing.get(id),fork=forking.get(id)
       ended.add(id)
       outputs.delete(id);discardClaudeRescue(id)
-      ticked.delete(id);stopIdle(id);busy.delete(id)
+      ticked.delete(id);stopIdle(id);busy.delete(id);turnStart.delete(id)
       if(fork?.claim){const {claim_id,run_id}=fork.claim;fork.claim=null;try{await cli($,'fork-settle',id,JSON.stringify({claim_id,run_id,reason:'session-ended'}))}catch{}}
       if(state){state.handoff=true;state.controller.abort(Error('Session ended'))}
       else await cli($,'summary-handoff',id)
@@ -287,12 +314,12 @@ export function register(on) {
     // kept and swapped in at the threshold without asking again) is answered too: when the summaries are
     // ready, ours is what gets kept; when they are not, Claude Code prepares its own as usual.
     if (e.agentId) return next(e)
-    // The /compact this module ran after the cache expired (lookIdle).
-    let plan,id,cold=e.trigger==='manual'&&coldRuns.size>0
+    // The /compact this module ran after the cache expired (lookIdle) or at the end of a turn (compactAtTurnEnd).
+    let plan,id,own=e.trigger==='manual'&&ownRuns.size>0?'unknown':null
     try {
       id=await $.session.id()
-      cold&&=coldRuns.has(id)
-      plan = await packet($, id, e.messages, e.instructions, cold ? 'cold' : e.trigger)
+      own&&=ownRuns.get(id)||null
+      plan = await packet($, id, e.messages, e.instructions, own || e.trigger)
       // Native precompute is kept until the threshold without dispatching this
       // hook again. Defer only eligible, active summary work and never rescue
       // merely for precompute. Actual pressure still has bounded native handoff.
@@ -311,11 +338,11 @@ export function register(on) {
         finally{clearTimeout(timer);if(cancel)e.signal.removeEventListener('abort',cancel)}
         plan=await packet($,id,e.messages,e.instructions,e.trigger,{afterCatchup:true,catchupMs:Date.now()-started})
       }
-      if(!cold&&e.trigger!=='precompute'&&!plan?.use&&plan?.rescue&&!ended.has(id)&&!e.signal?.aborted)plan=await rescueClaude(rescueHost($),id,e)||plan
-    } catch { plan = null;if(!cold)try{await cli($,'compact-diagnostic',await $.session.id())}catch{} }
+      if(!own&&e.trigger!=='precompute'&&!plan?.use&&plan?.rescue&&!ended.has(id)&&!e.signal?.aborted)plan=await rescueClaude(rescueHost($),id,e)||plan
+    } catch { plan = null;if(!own)try{await cli($,'compact-diagnostic',await $.session.id())}catch{} }
     if (!ended.has(id)&&!e.signal?.aborted&&plan?.use && plan.start > 0 && plan.start < e.messages.length)
       return { messages: [{ role: 'user', text: plan.packet, toolUses: [] }, ...e.messages.slice(plan.start)] }
-    if (cold) return { skip: `SuperLcm: ${plan?.reason || 'no compaction needed'}` }
+    if (own) return { skip: `SuperLcm: ${plan?.reason || 'no compaction needed'}` }
     return next(e)
   })
 }

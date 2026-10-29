@@ -52,10 +52,12 @@ export function cacheExpiry(store,id) {
  const seen=store.cacheTouch(id),touched=Math.max(last.at,seen?.at||0),ttl=last.ttl||HOUR
  return {...last,touched,ttl,expiresAt:touched+ttl+COLD_MARGIN_MS,tried:seen?.tried===last.at}
 }
+const compactionOff=(store,id,env)=>env.SUPERLCM_CLI_WORKER==='1'||!store.integrationEnabled('claude-code')||store.isDeleted(id)||store.metadata(id).harness!=='claude-code'?{none:'disabled'}
+ :store.takeover().enabled?null:{none:'takeover off'}
 export function coldCompactionDue(store,id,{env=process.env,tokens=0,window=0,touched=0,now=Date.now()}={}) {
- if(env.SUPERLCM_CLI_WORKER==='1'||!store.integrationEnabled('claude-code')||store.isDeleted(id)||store.metadata(id).harness!=='claude-code')return {none:'disabled'}
+ const off=compactionOff(store,id,env)
+ if(off)return off
  const takeover=store.takeover()
- if(!takeover.enabled)return {none:'takeover off'}
  if(touched>0)store.noteCacheTouch(id,Math.min(touched,now))
  const cache=cacheExpiry(store,id)
  if(!cache)return {none:'no response yet'}
@@ -65,6 +67,22 @@ export function coldCompactionDue(store,id,{env=process.env,tokens=0,window=0,to
  if(now<cache.expiresAt)return {none:'cache still warm',dueAt:cache.expiresAt,ttl:cache.ttl}
  const limit=claudeCompactAt(takeover,window,env),size=Math.max(tokens,cache.tokens)
  return size>=limit*COLD_SHARE?{compact:true,tokens:size}:{none:'context small'}
+}
+// 回合末压缩: a takeover compaction inside a turn (Claude Code's threshold reached between tool calls, or a prompt
+// too long) shows its packet in the Claude app as if the person typed it. Claude Code streams a module's packet to
+// the app as a plain user message, and a module cannot mark it as the compaction summary, as Claude Code's own is.
+// A /compact at a turn boundary goes to the app as a replay, which it does not draw. So when the next turn would
+// likely cross the threshold (the context plus what the turn just ended added, at least END_ROOM of the
+// threshold), the module compacts at the end of this one. A compaction still needed inside a turn is answered by
+// the takeover as before.
+export const END_ROOM=.15
+export function endCompactionDue(store,id,{env=process.env,tokens=0,window=0,grew=0}={}) {
+ const off=compactionOff(store,id,env)
+ if(off)return off
+ const limit=claudeCompactAt(store.takeover(),window,env)
+ if(!(tokens>0)||!(limit>0))return {none:'no context size'}
+ if(tokens<limit*COLD_SHARE)return {none:'context small'}
+ return tokens+Math.max(grew,limit*END_ROOM)>=limit?{compact:true,tokens}:{none:'room for the next turn'}
 }
 
 export function flushUnderPressure(store,id,{env=process.env,tokens=0,window=0}={}) {

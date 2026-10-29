@@ -154,7 +154,7 @@ function planWith({ meta, events, nodes, messages, instructions = '', tokens = 0
   // Each message's share of Claude Code's own token count, by its size in characters.
   const size = m => m.size ?? (m.text.length + 200)
   const total = messages.reduce((s, m) => s + size(m), 0) || 1
-  const target=trigger==='manual'||trigger==='cold'?Math.min(window*TARGET_AFTER,tokens*.5):window*TARGET_AFTER
+  const target=['manual','cold','turn-end'].includes(trigger)?Math.min(window*TARGET_AFTER,tokens*.5):window*TARGET_AFTER
   // The newest keepTokens (at most half of the context) also stay word for word, from the start of a turn,
   // even where summaries already cover them, so the work in hand continues with its full detail.
   const widen=start=>{

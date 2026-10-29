@@ -17,7 +17,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { scheduleSummary, drainSummaryQueue } from './summary-scheduler.js'
 import { enqueueSummaryRun, reserveSummaryRun, bindSummaryRun, progressSummaryRun, finishSummaryRun, activeSummaryRun, summaryConcurrency } from './summary-runs.js'
-import { summaryTick, catchUp, catchupDeadlineMs, pendingLeaves, coldCompactionDue, cacheExpiry, firstTranscript } from './summary-background.js'
+import { summaryTick, catchUp, catchupDeadlineMs, pendingLeaves, coldCompactionDue, endCompactionDue, cacheExpiry, firstTranscript } from './summary-background.js'
 import { claimHostFork, settleHostFork } from './main-fork.js'
 import { randomUUID } from 'node:crypto'
 import {claudeCompactionNodes} from './claude-checkpoints.js'
@@ -245,10 +245,11 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
 } else if (command==='compact-packet') {
   // Called by the plugin's compaction module (hooks/compact-mod.js) with the live transcript on stdin.
   // Always answers JSON; { use:false, reason } hands the compaction back to Claude Code.
-  let reply
+  let reply,dryRun=false
   const store=new ClaudeStore()
   try {
     const input=JSON.parse(await new Promise((resolve,reject)=>{let text='';process.stdin.setEncoding('utf8');process.stdin.on('data',part=>{text+=part;if(text.length>32e6)reject(new Error('Oversized compaction input'))});process.stdin.on('end',()=>resolve(text))}))
+    dryRun=input.dry===true
     const session=rest[0],setting=store.takeover()
     // A conversation the Claude app continued under a new ID can compact before any hook recorded it (its
     // transcript may appear only after SessionStart): record it here, the way the hooks would.
@@ -280,7 +281,10 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
       // A compaction after the cache expired that does not happen leaves no record: nothing compacted natively.
       // Coverage is that of the conversation whose summaries the packet uses (the parent's for stage 'parent').
       let covered=session
-      const note=(result,stage,catchupMs=null)=>input.trigger==='cold'&&!result.use?null:store.noteCompaction(session,{...compactionDiagnostic(result,{nodes:store.nodeRows(covered,0),records:store.stats(covered).records,before:input.tokens||0,trigger:input.trigger}),stage:stage||(result.stage==='inline'||result.inline?'inline':'first'),pending:pendingLeaves(store,covered),after:result.after??null,catchupMs})
+      // One after the cache expired or at the end of a turn is SuperLcm's own: it compacts or is skipped, and is never
+      // handed to Claude Code. A dry run (the module checking a turn-end compaction first) changes nothing.
+      const cold=input.trigger==='cold',quiet=cold||input.trigger==='turn-end',dry=dryRun
+      const note=(result,stage,catchupMs=null)=>dry||quiet&&!result.use?null:store.noteCompaction(session,{...compactionDiagnostic(result,{nodes:store.nodeRows(covered,0),records:store.stats(covered).records,before:input.tokens||0,trigger:input.trigger}),stage:stage||(result.stage==='inline'||result.inline?'inline':'first'),pending:pendingLeaves(store,covered),after:result.after??null,catchupMs})
       const notePlan=(result,stage,ms=null)=>{
         if(result.initial){note(result.initial,stage||'first',ms);note(result,'inline',ms)}
         else note(result,stage,ms)
@@ -294,23 +298,24 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
         return found.length===1&&store.metadata(found[0]).harness==='claude-code'?found[0]:null
       }
       // A request can read the cache between the module's cold-check and this compaction: then it is warm again.
-      const cold=input.trigger==='cold',cache=cold?cacheExpiry(store,session):null,expired=!!cache&&Date.now()>=cache.expiresAt
+      const cache=cold?cacheExpiry(store,session):null,expired=!!cache&&Date.now()>=cache.expiresAt
       reply=cold&&!expired?{use:false,reason:'the session was used again after its cache expired'}:plan()
       let stage=input.afterCatchup?'catchup':null
       if(!reply.use&&!reply.ambiguous&&(!cold||expired)){const from=parent(),inherited=from&&plan(from);if(inherited?.use){reply=inherited;stage='parent';covered=from}}
-      // After the cache expired, compacting pays only when the packet is at most half of what would be re-cached.
-      if(cold&&reply.use&&reply.after>(input.tokens||0)*.5)reply={use:false,reason:'a compaction after the cache expired would not halve the context'}
+      // After the cache expired, compacting pays only when the packet is at most half of what would be re-cached; at the
+      // end of a turn, only one that leaves the next turn real room is worth doing ahead of the threshold.
+      if(quiet&&reply.use&&reply.after>(input.tokens||0)*.5)reply={use:false,reason:cold?'a compaction after the cache expired would not halve the context':'a compaction at the end of a turn would not halve the context'}
       // One SuperLcm declines is not tried again until the next main-thread response.
-      if(cold&&expired&&!reply.use)store.noteColdTried(session,cache.at)
+      if(cold&&expired&&!reply.use&&!dry)store.noteColdTried(session,cache.at)
       notePlan(reply,stage,input.afterCatchup&&Number.isFinite(input.catchupMs)?input.catchupMs:null)
       const eligible=['coverage_lag','uncovered_oldest','no_summaries','context_too_large'].includes(compactionDiagnostic(reply).code)
       const chosen=effective(store,session),harness=store.metadata(session).harness
-      // One after the cache expired schedules nothing: it is skipped, not handed to Claude Code.
-      const mayWrite=!cold&&store.integrationEnabled(harness)&&harness==='claude-code'&&['cli','api'].includes(chosen.mode)
+      // SuperLcm's own compaction schedules nothing: it is skipped, not handed to Claude Code.
+      const mayWrite=!quiet&&store.integrationEnabled(harness)&&harness==='claude-code'&&['cli','api'].includes(chosen.mode)
       if(!reply.use&&!reply.ambiguous&&eligible&&mayWrite){
         store.setSummaryFlush(session,store.db.prepare('SELECT MAX(ordinal) AS o FROM events WHERE session=?').get(session)?.o??-1)
       }
-      if(input.trigger!=='precompute'&&!cold&&!input.afterCatchup&&!reply.use&&!reply.ambiguous&&reply.stage!=='inline'&&!reply.inline&&eligible){
+      if(input.trigger!=='precompute'&&!quiet&&!input.afterCatchup&&!reply.use&&!reply.ambiguous&&reply.stage!=='inline'&&!reply.inline&&eligible){
         const pending=pendingLeaves(store,session),deadlineMs=catchupDeadlineMs(),chosen=effective(store,session),harness=store.metadata(session).harness
         if(deadlineMs>0&&pending>=1&&pending<=4&&store.integrationEnabled(harness)&&['cli','api'].includes(chosen.mode)){
           if(chosen.mode==='cli'&&writerTool(harness)==='claude-code')reply={...reply,catchup:{host:true,deadlineMs,maxPieces:4}}
@@ -334,11 +339,11 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
           }catch{delete reply.retry}
         }
       }
-      if(reply.use)store.noteTakeover(session,input.tokens||0,reply.after||0)
-      else if(!cold&&chosen.mode!=='main-fork'&&!reply.ambiguous&&store.integrationEnabled('claude-code')&&store.metadata(session).harness==='claude-code'&&['coverage_lag','uncovered_oldest','no_summaries','context_too_large','unplaced_boundary'].includes(compactionDiagnostic(reply).code))reply.rescue=true
+      if(reply.use&&!dry)store.noteTakeover(session,input.tokens||0,reply.after||0)
+      else if(!quiet&&chosen.mode!=='main-fork'&&!reply.ambiguous&&store.integrationEnabled('claude-code')&&store.metadata(session).harness==='claude-code'&&['coverage_lag','uncovered_oldest','no_summaries','context_too_large','unplaced_boundary'].includes(compactionDiagnostic(reply).code))reply.rescue=true
     }
-    if(src&&(!setting.enabled||store.isDeleted(session)))store.noteCompaction(session,compactionDiagnostic(reply,{nodes:store.nodeRows(session,0),records:store.stats(session).records,before:input.tokens||0,trigger:input.trigger}))
-  } catch(error) { reply={use:false,reason:'compaction planner failed; originals retained',error:true};if(rest[0]&&store.source(rest[0]))store.noteCompaction(rest[0],compactionDiagnostic(reply,{records:store.stats(rest[0]).records})) }
+    if(src&&!dryRun&&(!setting.enabled||store.isDeleted(session)))store.noteCompaction(session,compactionDiagnostic(reply,{nodes:store.nodeRows(session,0),records:store.stats(session).records,before:input.tokens||0,trigger:input.trigger}))
+  } catch(error) { reply={use:false,reason:'compaction planner failed; originals retained',error:true};if(!dryRun&&rest[0]&&store.source(rest[0]))store.noteCompaction(rest[0],compactionDiagnostic(reply,{records:store.stats(rest[0]).records})) }
   finally { store.close() }
   process.stdout.write(JSON.stringify(reply)+'\n')
 } else if (command==='summary-tick') {
@@ -355,6 +360,15 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
   const flag=name=>{const at=rest.indexOf(name),n=at<0?0:Number(rest[at+1]);return Number.isSafeInteger(n)&&n>0?n:0}
   // --touched: the module saw a request billed to the session that may have read the main cache.
   try{reply=rest[0]&&store.source(rest[0])?coldCompactionDue(store,rest[0],{tokens:flag('--tokens'),window:flag('--window'),touched:flag('--touched')}):{none:'not recorded'}}catch{reply={none:'check failed'}}
+  finally{store.close()}
+  process.stdout.write(JSON.stringify(reply)+'\n')
+} else if (command==='end-check') {
+  // 回合末压缩 (hooks/compact-mod.js): whether to compact at the end of this turn, ahead of the threshold.
+  const store=new ClaudeStore()
+  let reply
+  const flag=name=>{const at=rest.indexOf(name),n=at<0?0:Number(rest[at+1]);return Number.isSafeInteger(n)&&n>0?n:0}
+  // --grew: how much the turn that just ended added to the context.
+  try{reply=rest[0]&&store.source(rest[0])?endCompactionDue(store,rest[0],{tokens:flag('--tokens'),window:flag('--window'),grew:flag('--grew')}):{none:'not recorded'}}catch{reply={none:'check failed'}}
   finally{store.close()}
   process.stdout.write(JSON.stringify(reply)+'\n')
 } else if (command==='fork-claim'||command==='fork-settle') {
