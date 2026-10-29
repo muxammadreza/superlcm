@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.3 — 2026-10-29
+
+- Compact Claude Code conversations at the end of a turn when the next turn would likely cross the compaction threshold. A takeover compaction inside a turn shows SuperLcm's packet in the Claude app as if the person had typed it: Claude Code streams a module's packet as a plain user message, and a module cannot mark it as the compaction summary the way Claude Code marks its own. A `/compact` goes to the app as a replay, which it does not draw. At the end of each turn the module checks whether the context plus what that turn added (at least 15% of the threshold) reaches the threshold, and only from 40% of it. If so, it first checks that SuperLcm can answer with a packet that at least halves the context, then runs `/compact`. That compaction (history trigger "at the end of a turn") is SuperLcm's or skipped, never Claude Code's. A compaction still needed inside a turn is taken over as before.
+
 ## 0.6.2 — 2026-10-28
 
 - Fix Claude Code takeover compacting again seconds after a compaction, so the context stayed full. In ratio mode the compaction module reports the model's whole capacity (1M), and the packet was sized for 80% of it (800K), leaving about 200K. Claude Code also applies `autoCompactWindow`, so with 300K it compacts at (300K − 20K) × 80% = 224K: one recorded session compacted three times in 30 seconds, each time from about 225K to 217K. The compaction packet, the flush under context pressure, the idle cold-compaction check and the main-fork preparation point now all use the threshold Claude Code really compacts at, and an automatic compaction is also bounded by the context's current size.
