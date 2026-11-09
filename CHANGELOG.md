@@ -1,5 +1,9 @@
 # Changelog
 
+## Fork 0.6.5 — 2026-11-09
+
+- The main-fork writer inside Claude Code (`$.model.fork`) now checks the transcript source before saving, as upstream's fork path does, and no longer passes the old output estimate as a hard limit.
+
 ## Fork 0.6.4 — 2026-11-09
 
 - Merge upstream 0.6.1 (unreleased) into the fork. Upstream's Persian/Arabic/Urdu detection (#19) replaces the fork's; the fork's takeover sizing, idle and end-of-turn compaction, main-fork `$.model.fork` writer, fallback summary models and stable-entry fix are kept on top.

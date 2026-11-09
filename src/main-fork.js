@@ -301,7 +301,8 @@ export function settleHostFork(store,session,input,{env=process.env}={}){
       return {saved:false,handoff:['nothing-to-fork','unsupported'].includes(input.reason)}
     }
     if(!valid())throw Object.assign(Error('后台分支配置已变化'),{summaryKind:'cancelled'})
-    const tree=parseForkTree(input.text,plan.leaves,plan.language,{fanout:plan.fanout,targetTokens:plan.targetTokens})
+    verifyClaudeForkSource(store,session)
+    const tree=parseForkTree(input.text,plan.leaves,plan.language,{fanout:plan.fanout})
     const ids=saveForkTree(store,session,plan,tree,{model:'claude-code-fork:'+String(input.model||'session-model').slice(0,80),usage:input.usage&&typeof input.usage==='object'?input.usage:{},owner:'host',validate:valid})
     store.completeSummaryBatch(session,plan.digest,plan.revision);store.setStatus(session,'ok')
     progressSummaryRun(store,runId,owner,{created:ids.length});finishSummaryRun(store,runId,{owner,state:'done'})
