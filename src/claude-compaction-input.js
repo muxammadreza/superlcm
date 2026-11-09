@@ -1,40 +1,71 @@
 // Text alone cannot distinguish a native summary from a person quoting one.
 // Verify Claude's isCompactSummary flag in the exact archived record instead.
 import { coveredThrough } from './compaction.js'
-import {claudeCheckpoints} from './claude-checkpoints.js'
+import {claudeCompactionNodes} from './claude-checkpoints.js'
 import {summaryToolPairing} from './summary-source.js'
 import {isRequestCopy} from './claude-records.js'
+import {hasUnrepresentedContent} from './source-completeness.js'
 const prefix = 'This session is being continued from a previous conversation'
+const matchKey = text => String(text||'').replace(/\s+/g,'').slice(0,600)
 const textOf = record => {
   const content = record?.message?.content??record?.content
   return typeof content === 'string' ? content : Array.isArray(content) ? content.filter(p => p?.type === 'text').map(p => p.text).join('\n') : ''
 }
 export function verifiedCompactionInput(store, session, messages) {
   const nativeTexts = [], promptTexts = [], packets=[], promptOrigins=new Map(),turnOrigins=new Map()
-  const through = coveredThrough([...store.nodeRows(session, 0),...claudeCheckpoints(store,session)]), all=store.eventRows(session)
+  // Use the same quality-checked frontier as replacement planning. An old,
+  // uncertified node cannot prove that a native checkpoint was covered.
+  const through = coveredThrough(claudeCompactionNodes(store,session)), all=store.eventRows(session)
+  const liveUserTexts=new Map(messages.filter(m=>m.role==='user'&&m.text?.trim()).map(m=>[m.text.trim(),m.text.trim()]))
+  const livePrompts=new Set([...liveUserTexts.keys()].map(text=>matchKey('user: '+text)))
   const opening=messages[0]?.text?.trim()||'',packetCandidate=opening.startsWith('<superlcm-context ')
-  const events=all.map(event=>{
+  const events=all.map(original=>{
+    const event={...original}
     if(!event.preview.startsWith('user: ') && !(packetCandidate&&!event.preview))return event
+    if(event.preview.startsWith('user: ')&&!livePrompts.has(matchKey(event.preview)))return event
     let record;try{record=JSON.parse(store.exact(session,event.ordinal))}catch{return {...event,humanPrompt:false}}
     if(isRequestCopy(record))return {...event,humanPrompt:false}
     if(record?.type!=='user'&&record?.role!=='user')return event
     const text=textOf(record),blocks=record.message?.content??record.content,toolResults=Array.isArray(blocks)&&blocks.some(b=>b.type==='tool_result')
+    const keys=[...new Set([text.trim(),text.slice(0,2000).trim()])].filter(key=>key&&liveUserTexts.has(key))
+    // Similar long prompts may share a preview. Only retain a reference to a
+    // matching live string, never every full historical original.
+    if(!keys.length)return event
+    const matchedText=liveUserTexts.get(keys[0])
     const human=!record.isMeta&&!record.isCompactSummary&&!toolResults&&!!text.trim()
     const origin=record.origin?.kind??(record.promptSource==='system'?'system':null)
     const systemOrigin=['system','task-notification'].includes(origin)
     const knownOrigin=systemOrigin||origin==='human'
     const humanPrompt=human&&!systemOrigin
-    const value={...event,text,toolResults,humanPrompt,uuid:record.uuid,...(record.isCompactSummary===true?{continuation:true}:{})}
+    const value={...event,text:matchedText,toolResults,humanPrompt,uuid:record.uuid,...(record.isCompactSummary===true?{continuation:true}:{})}
     const endsTurn=summaryToolPairing(JSON.stringify(record)).endsTurn===true
-    for(const key of new Set([text.trim(),text.slice(0,2000).trim()]))if(key){
+    for(const key of keys){
       const flags=promptOrigins.get(key)||[];flags.push(knownOrigin?humanPrompt:null);promptOrigins.set(key,flags)
       const turns=turnOrigins.get(key)||[];turns.push(endsTurn);turnOrigins.set(key,turns)
     }
-    if(text.trimStart().startsWith('<superlcm-context ')&&!event.preview){packets.push({text:text.trim(),ordinal:event.ordinal});return {...value,humanPrompt:false}}
+    if(text.trimStart().startsWith('<superlcm-context ')&&!event.preview){packets.push({text:matchedText,ordinal:event.ordinal});return {...value,humanPrompt:false}}
     if(!event.preview.startsWith(`user: ${prefix}`))return value
-    if(record.isCompactSummary!==true){promptTexts.push(text.trim());return value}
+    if(record.isCompactSummary!==true){promptTexts.push(matchedText);return value}
     if(through<event.ordinal)return value
-    nativeTexts.push(text.trim());return {...value,nativeSummary:true}
+    nativeTexts.push(matchedText);return {...value,nativeSummary:true}
+  }).map(event=>{
+    // Inline fallback alone needs exact records beyond the covered prefix.
+    // Do not retain every previously summarized record in memory.
+    if(event.preview.startsWith('user: '))Object.defineProperty(event,'verifiedRequest',{get:()=>{
+      const raw=store.exact(session,event.ordinal)
+      let record;try{record=JSON.parse(raw)}catch{return null}
+      const content=record?.message?.content??record?.content
+      const text=textOf(record),origin=record.origin?.kind??(record.promptSource==='system'?'system':null)
+      if(isRequestCopy(record)||(record?.type!=='user'&&record?.role!=='user')||record.isMeta||record.isCompactSummary||
+        ['system','task-notification'].includes(origin)||Array.isArray(content)&&content.some(b=>b?.type==='tool_result')||
+        !text.trim()||hasUnrepresentedContent(raw,'jsonl',{strictRecords:true}))return null
+      return {ordinal:event.ordinal,text}
+    }})
+    if(event.ordinal>through)Object.defineProperties(event,{
+      exactRaw:{get:()=>store.exact(session,event.ordinal)},
+      sourceHasNonText:{get:()=>hasUnrepresentedContent(store.exact(session,event.ordinal),'jsonl',{strictRecords:true})}
+    })
+    return event
   })
   return { events, messages: messages.map((message, index) => {
     // The module sends at most 2000 characters. Only the opening synthetic

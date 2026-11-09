@@ -7,11 +7,14 @@ import {buildSummaryPrompt,SUMMARY_SYSTEM} from './summary-policy.js'
 import {estimateSummaryTokens} from './summary-tokens.js'
 import {isReducedSummary} from './summary-fitting.js'
 import {isRequestCopy} from './claude-records.js'
+import {hasUnrepresentedContent} from './source-completeness.js'
 
 import {ids,canonical,bodies,liveMessage} from './claude-live-messages.js'
 export {liveMessage} from './claude-live-messages.js'
 
-const messageKey=m=>rescueHash([m.role,m.text.trim(),ids(m.toolUses),ids(m.toolResultIds)])
+// Whitespace can carry meaning (for example in a code block). An archive
+// that differs only at a text boundary is still not proof of the live input.
+const messageKey=m=>rescueHash([m.role,m.text,ids(m.toolUses),ids(m.toolResultIds)])
 function archivedMessages(store,session) {
   return store.eventRows(session).flatMap(e=>{
     const raw=store.exact(session,e.ordinal),record=JSON.parse(raw),role=record.message?.role||record.role||record.type
@@ -22,10 +25,38 @@ function archivedMessages(store,session) {
     const pairing=summaryToolPairing(raw)
     const blocks=Array.isArray(content)?content:[],toolBodies=bodies({toolUses:blocks.filter(b=>b.type==='tool_use'),toolResults:blocks.filter(b=>b.type==='tool_result')})
     const message={role,text,toolUses:pairing.opened,toolResultIds:pairing.closed}
-    return [{ordinal:e.ordinal,digest:e.digest,key:messageKey(message),native:record.isCompactSummary===true,
+    return [{ordinal:e.ordinal,digest:e.digest,key:messageKey(message),native:record.isCompactSummary===true,nonText:hasUnrepresentedContent(raw,'jsonl',{strictRecords:true}),
       endsTurn:pairing.endsTurn===true,
       toolBodies:toolBodies.map(body=>Object.fromEntries(Object.entries(body).map(([name,value])=>[name,rescueHash(canonical(value))])))}]
   })
+}
+// Compare the actual active sequence, including tool payloads, with one exact
+// archived sequence. An id without its body is not proof of the live content.
+export function verifiedActiveMessages(store,session,input,{requireLatest=true}={}) {
+  const messages=input.map(liveMessage)
+  const complete=messages.every(m=>m.toolUses.every(id=>m.toolBodies.some(b=>b.id===id&&b.kind==='use'&&'name' in b&&'value' in b))&&
+    m.toolResultIds.every(id=>m.toolBodies.some(b=>b.id===id&&b.kind==='result'&&'value' in b)))
+  if(!complete)return null
+  const archived=archivedMessages(store,session),keys=messages.map(messageKey),candidates=[]
+  for(let at=0;at+keys.length<=archived.length;at++)if(keys.every((key,i)=>{
+    const stored=archived[at+i]
+    return stored.key===key&&messages[i].toolBodies.every(body=>{
+      const original=stored.toolBodies.find(b=>b.id===rescueHash(body.id)&&b.kind===rescueHash(body.kind))
+      if(body.kind==='result'&&(original?.error??rescueHash(false))!==rescueHash(body.error??false))return false
+      return !!original&&Object.entries(body).every(([name,value])=>{
+        const storedHash=original[name]??(name==='error'?rescueHash(false):undefined)
+        return storedHash!==undefined&&storedHash===rescueHash(canonical(value))
+      })
+    })
+  }))candidates.push(at)
+  if(candidates.length!==1)return null
+  const active=archived.slice(candidates[0],candidates[0]+messages.length)
+  return active.length&&(!requireLatest||active.at(-1).ordinal===archived.at(-1).ordinal)?active:null
+}
+export function verifiedCompactionCut(active,plan) {
+  return !!active?.length&&Number.isSafeInteger(plan.start)&&plan.start>0&&plan.start<active.length&&
+    Number.isSafeInteger(plan.through)&&plan.through<=active.at(-1).ordinal&&
+    active.slice(0,plan.start).every(message=>message.ordinal<=plan.through&&!message.nonText)
 }
 export function rescuePacket(store,session,p,summary) {
   const node={id:p.nodeId,level:p.level,first:0,last:p.through,summary,rescueRequest:p.request}
@@ -39,21 +70,8 @@ export function prepareRescueSource(store,session,input) {
   const setting=store.takeover(),messages=(input.messages||[]).map(liveMessage)
   const context=verifiedCompactionInput(store,session,messages),events=context.events
   if(messages.some(m=>!Number.isFinite(m.size)||m.size<=0))return null
-  const archived=archivedMessages(store,session),keys=messages.map(messageKey),candidates=[]
-  for(let at=0;at+keys.length<=archived.length;at++)if(keys.every((key,i)=>{
-    const stored=archived[at+i]
-    return stored.key===key&&messages[i].toolBodies.every(body=>{
-      const original=stored.toolBodies.find(b=>b.id===rescueHash(body.id)&&b.kind===rescueHash(body.kind))
-      return !!original&&Object.entries(body).every(([name,value])=>{
-        const storedHash=original[name]??(name==='error'?rescueHash(false):undefined)
-        return storedHash!==undefined&&storedHash===rescueHash(canonical(value))
-      })
-    })
-  }))candidates.push(at)
-  // The entire exact active sequence must identify one original timeline.
-  if(candidates.length!==1)return null
-  const active=archived.slice(candidates[0],candidates[0]+messages.length)
-  if(active.at(-1).ordinal!==archived.at(-1).ordinal)return null
+  const active=verifiedActiveMessages(store,session,messages)
+  if(!active)return null
   // Full sequence and tool-body matching above identify the exact source turn,
   // even when separate notifications happen to repeat the same prompt text.
   context.messages=context.messages.map((m,i)=>({...m,verifiedTurnBoundary:active[i].endsTurn}))
@@ -77,6 +95,7 @@ export function prepareRescueSource(store,session,input) {
     if(wide>0)start=Math.min(start,wide)
   }
   if(start<=0||start>=messages.length)return null
+  if(active.slice(0,start).some(m=>m.nonText))return null
   const pending=new Set()
   for(const m of context.messages.slice(0,start)){if(m.verifiedTurnBoundary)pending.clear();for(const id of m.toolUses)pending.add(id);for(const id of m.toolResultIds)pending.delete(id)}
   if(context.messages[start].verifiedTurnBoundary)pending.clear()
@@ -84,20 +103,30 @@ export function prepareRescueSource(store,session,input) {
   const matched=active.slice(0,start),through=matched.at(-1).ordinal
   const nodes=claudeCompactionNodes(store,session).filter(n=>n.last<=through)
   const covered=coveredThrough(nodes),prefix=frontier(nodes,covered)
-  if(prefix.some(n=>isReducedSummary(n.summary)))return null
+  if(covered>=0&&!prefix.length||prefix.some(n=>isReducedSummary(n.summary)))return null
   let from=covered+1,content=prefix.map(n=>`[summary ${n.id}; records ${n.first}-${n.last}]\n${n.summary}`).join('\n')
   const opening=matched[0]
   // A real native checkpoint is usable historical context; a person pasting
   // the same prose cannot supply this proof.
   if(opening.native&&opening.ordinal>=from){
+    // The host's checkpoint is already a summary. It does not prove that a
+    // new SuperLcm rescue saw every older original that it would claim to cover.
+    for(const event of store.eventRows(session).filter(e=>e.ordinal>=from&&e.ordinal<opening.ordinal)){
+      const raw=store.exact(session,event.ordinal)
+      if(hasUnrepresentedContent(raw,'jsonl',{strictRecords:true})||summarySource(raw))return null
+    }
     const original=JSON.parse(store.exact(session,opening.ordinal)),blocks=original.message?.content??original.content
     const native=typeof blocks==='string'?blocks:blocks.filter(b=>b.type==='text').map(b=>b.text||'').join('\n')
     content+=`\n[verified native checkpoint record ${opening.ordinal}]\n${native}`
     from=opening.ordinal+1
   }
   for(const e of store.eventRows(session).filter(e=>e.ordinal>=from&&e.ordinal<=through)){
+    const raw=store.exact(session,e.ordinal)
+    // Text projection does not include images, files or audio. A rescue cannot
+    // claim to cover those records unless an earlier complete node already did.
+    if(hasUnrepresentedContent(raw,'jsonl',{strictRecords:true}))return null
     if(request?.ordinal===e.ordinal)continue // carried verbatim, never rewritten
-    const source=summarySource(store.exact(session,e.ordinal))
+    const source=summarySource(raw)
     if(source)content+=`\n[record ${e.ordinal}]\n${source}`
     if(content.length>32e6)return null
   }
@@ -107,9 +136,9 @@ export function prepareRescueSource(store,session,input) {
   const task={level,kind:'checkpoint',first:0,last:through,language,requireHeading:true,maxChars:60000,targetTokens:outputTokens}
   const prompt=buildSummaryPrompt(content,task),inputTokens=estimateSummaryTokens(SUMMARY_SYSTEM+prompt)
   if(inputTokens+outputTokens+2048>window||prompt.length>32e6)return null
-  const p={start,keep:messages.length-start,through,request,window,tokens,keptTokens:messages.slice(start).reduce((s,m)=>s+size(m),0)*tokens/total,
+  const p={evidenceVersion:3,start,keep:messages.length-start,through,request,window,tokens,keptTokens:messages.slice(start).reduce((s,m)=>s+size(m),0)*tokens/total,
     instructions:input.instructions||'',model:input.model,level,language,outputTokens,sourceHash:rescueSourceHash(store,session,through),
     children:prefix.map(n=>n.id),childHashes:prefix.map(n=>[n.id,rescueHash(n.summary)]),inputHash:rescueHash(messages),settingHash:rescueHash(setting),cancelId:input.cancel_id||null,surfaceHash:rescueSourceHash(store,session,Number.MAX_SAFE_INTEGER)}
-  p.nodeId='claude-rescue-'+rescueHash([session,p.sourceHash,p.inputHash,p.settingHash,p.model,p.childHashes,p.instructions,p.window,p.keptTokens]).slice(0,40)
+  p.nodeId='claude-rescue-'+rescueHash([p.evidenceVersion,session,p.sourceHash,p.inputHash,p.settingHash,p.model,p.childHashes,p.instructions,p.window,p.keptTokens]).slice(0,40)
   return {preparation:p,system:SUMMARY_SYSTEM,prompt,task,maxTokens:outputTokens}
 }

@@ -1,6 +1,7 @@
 import { fitSummary, repairSummaryPromptParts } from '../src/summary-fitting.js'
 import { checkedSummary, joinSummaryPrompt } from '../src/summary-policy.js'
 import {rescueClaude,discardClaudeRescue} from './claude-rescue.js'
+import {bodies} from '../src/claude-live-messages.js'
 // A Claude Code module (2.1.286+), two jobs:
 // 接管压缩: when the main conversation compacts, SuperLcm answers with its own summaries plus the newest
 // messages word for word (see src/compaction.js). Anything unexpected, the setting being off, a subagent, or
@@ -266,7 +267,7 @@ const IMAGE_CHARS = 6400
 const images = (value, depth = 0) => !value || typeof value !== 'object' || depth > 3 ? 0 : value.type === 'image' ? 1 : Object.values(value).reduce((n, v) => n + images(v, depth + 1), 0)
 const sizeOf = m => m.text.length + 200 + (m.toolUses || []).reduce((n, t) => n + JSON.stringify(t.input ?? '').length, 0)
   + (m.toolResults || []).reduce((n, t) => n + String(t.text ?? '').length + images(t.result) * IMAGE_CHARS, 0)
-const toInput = messages => messages.map(m => ({ role: m.role, text: m.text.slice(0, 2000), toolUses:(m.toolUses||[]).map(t=>({tool_use_id:t.tool_use_id||t.id||t.call_id})),toolResultIds:m.toolResultIds||(m.toolResults||[]).map(t=>t.tool_use_id||t.id||t.call_id).filter(Boolean),toolResults: m.toolResults?.length ? 1 : 0, size: sizeOf(m) }))
+const toInput = messages => messages.map(m => ({ role: m.role, text: m.text, toolUses:(m.toolUses||[]).map(t=>({tool_use_id:t.tool_use_id||t.id||t.call_id})),toolResultIds:m.toolResultIds||(m.toolResults||[]).map(t=>t.tool_use_id||t.id||t.call_id).filter(Boolean),toolBodies:bodies(m),toolResults: m.toolResults?.length ? 1 : 0, size: sizeOf(m) }))
 async function packet($, id, messages, instructions, trigger, extra = {}) {
   const usage = await $.session.usage()
   const input = JSON.stringify({ messages: toInput(messages), instructions: instructions || '', trigger, tokens: usage.context.tokens || 0, window: usage.context.window || 0,...extra })

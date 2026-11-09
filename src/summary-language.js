@@ -9,7 +9,14 @@ const languages = {
 export const languageInfo = code => ({code: languages[code] ? code : 'und', name:languages[code]?.[0]??null, script:languages[code]?.[1]??null})
 const count = (text, pattern) => (text.match(pattern)||[]).length
 export function cleanUserText(text) {
-  return String(text||'')
+  text=String(text||'')
+  // T3 provider switches prepend an imported history to the current human
+  // input. Imported prose must not outweigh the language of the real request.
+  if(/^Context handoff \([^\n]*\):\s*\nProvider context handoff\./.test(text)){
+    const boundary=text.lastIndexOf('\nUser message:\n')
+    text=boundary>=0?text.slice(boundary+'\nUser message:\n'.length):''
+  }
+  return text
     .replace(/<(system-reminder|system_reminder|environment_context|heartbeat|instructions|attached_document|tool_result|task-notification|preceding_summary|historical_draft)\b[^>]*>[\s\S]*?<\/\1>/gi,' ')
     .replace(/<(system-reminder|environment_context|heartbeat)\b[^>]*>[\s\S]*$/gi,' ')
     .replace(/```[^\n]*\n[\s\S]*?(?:```|$)/g,' ').replace(/`[^`\n]*`/g,' ')
@@ -39,12 +46,20 @@ export function userTextsFromMessages(messages, skipIds=new Set()) {
   return (messages||[]).filter(m=>m?.role==='user'&&!skipIds.has(m.id)).map(m=>userTextFromRecord(m)).filter(Boolean)
 }
 const scripts = {Han:/\p{Script=Han}/gu,Kana:/[\p{Script=Hiragana}\p{Script=Katakana}]/gu,Hangul:/\p{Script=Hangul}/gu,Latin:/\p{Script=Latin}/gu,Cyrillic:/\p{Script=Cyrillic}/gu,Arabic:/\p{Script=Arabic}/gu,Devanagari:/\p{Script=Devanagari}/gu,Thai:/\p{Script=Thai}/gu}
-// Persian, Arabic and Urdu share a script; the letters only one of them uses decide which it is.
-const arabicLetters={ur:/[\u0679\u0688\u0691\u06BA\u06D2]/gu,fa:/[\u067E\u0686\u0698\u06AF\u06A9\u06CC]/gu,ar:/[\u0629\u0643\u064A\u0649]/gu}
+// Urdu also uses several Persian letters, so an Urdu marker must take priority
+// over those shared letters. When mixed evidence is unclear, keep the script-only rule.
+const arabicLetters={ur:/[\u0679\u0688\u0691\u06BA\u06C1\u06BE\u06D2]/gu,fa:/[\u067E\u0686\u0698\u06AF\u06A9\u06CC]/gu,ar:/[\u0629\u0643\u064A\u0649]/gu}
+const distinctWords=(text,words)=>{const found=new Set(text.match(/\p{L}+/gu)||[]);return words.filter(word=>found.has(word)).length}
 function arabicScriptLanguage(text){
   const n=Object.fromEntries(Object.entries(arabicLetters).map(([code,re])=>[code,count(text,re)]))
-  if(n.ur>=3)return 'ur'
-  return n.fa>=3&&n.fa>n.ar*2?'fa':n.ar>=3&&n.ar>n.fa*2?'ar':'arab'
+  const urWords=distinctWords(text,['ہے','ہیں','نہیں','میں','کیا','آپ','کر','کی','کا','کے'])
+  const faWords=distinctWords(text,['این','است','برای','کنید','شود','را','هست','چیست'])
+  if(n.ur>=3&&n.ur>n.ar*2&&(n.ur*2>n.fa||urWords>=2))return 'ur'
+  if(n.ar>=3&&n.ar>n.fa*2&&n.ar>n.ur*2&&urWords<2)return 'ar'
+  // Most Persian marker letters are also used by Urdu. Even a small amount of
+  // Urdu-specific evidence makes a Persian claim unsafe.
+  if(n.ur>0)return 'arab'
+  return n.fa>=3&&n.fa>n.ar*2&&faWords>=2?'fa':'arab'
 }
 const stopWords={en:'the and is are to of in for with this that please should would can not',es:'el la los las que para por una como quiero pero',fr:'le les une des est pour avec dans vous nous veuillez',de:'der die das und ist nicht bitte mit eine ich',pt:'os uma para com não você quero são',it:'gli della delle una che per con non sono vorrei'}
 function sample(texts){return (Array.isArray(texts)?texts:[texts]).filter(x=>typeof x==='string').slice(-24).map(x=>cleanUserText(x).slice(-8000)).join('\n').slice(-32000)}

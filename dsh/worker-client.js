@@ -64,7 +64,7 @@ export class ArchiveWorker {
   request(body) {
     if (this.closed) return Promise.reject(Error('DSH archive worker is unavailable'))
     const id = ++this.serial, line = JSON.stringify({ id, ...body }) + '\n'
-    if (Buffer.byteLength(line) > 32e6) return Promise.reject(Error('DSH archive request exceeds 32 MB'))
+    if (Buffer.byteLength(line) > 34e6) return Promise.reject(Error('DSH archive request exceeds 34 MB'))
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject })
       this.child.stdin.write(line, error => {

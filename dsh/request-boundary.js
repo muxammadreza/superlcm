@@ -1,6 +1,6 @@
 import { captureMainRequest, forkScope } from './main-fork.js'
 import { isAgentLoopRequest } from '@deepseek-ai/dsh-llm'
-import { pressureStep } from './ratio-runtime.js'
+import { pressureStep,currentPolicy,activeInputTokens } from './ratio-runtime.js'
 import { SessionFoldRegistry } from './summary-guards.js'
 
 const REBUILD = 'SUPERLCM_REQUEST_REBUILD'
@@ -29,6 +29,9 @@ export function registerRequestBoundary(engine) {
         yield {type:'finish',reason:{kind:'error',failure:{code:REBUILD,message:'摘要已提交，重新组装本次请求'}}}
         return
       }
+      const policy=currentPolicy(engine,agent)
+      if(policy?.budgetMode==='ratio'&&activeInputTokens(engine,agent)+(options.maxTokens??0)>=policy.contextWindow-1024)
+        throw Error('实际请求的输出额度超过剩余窗口，当前请求已保留。请检查覆盖输出上限的其它设置。')
       yield* next()
     })()
   })

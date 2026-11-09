@@ -89,7 +89,7 @@ export async function importDshConversation(store,key,{env=process.env}={}) {
     const flush=()=>{result=captureDshPacket(store,{header,title,records},{clientKind:'import'});added+=result.added;records=[];bytes=0}
     for(const event of events) {
       const record=projectDshEvent(header.id,event,native.extract(event)),size=Buffer.byteLength(JSON.stringify(record))
-      if(size>4*1024*1024)throw Error('DSH 单条记录超过 4 MiB 限制')
+      if(size+1>32*1024*1024)throw Error('DSH 单条记录超过 32 MiB 限制')
       if(records.length>=500||bytes+size>24e6)flush()
       records.push(record);bytes+=size
     }

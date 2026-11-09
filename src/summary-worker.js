@@ -4,7 +4,7 @@ import { summarizeWith, writerTool, WRITER_CLI } from './cli-writers.js'
 import { enqueueSummary, summaryQueueRevision } from './summary-scheduler.js'
 import { reserveSummaryRun, finishSummaryRun, summaryConcurrency, enqueueSummaryRun } from './summary-runs.js'
 
-export async function runSummaryWorker(store,session,{runId=null,backend=null,env=process.env}={}) {
+export async function runSummaryWorker(store,session,{runId=null,backend=null,env=process.env,nativeSummarize=null}={}) {
   let run
   try {
     if(!runId){
@@ -35,7 +35,14 @@ export async function runSummaryWorker(store,session,{runId=null,backend=null,en
       const options={runId,shouldContinue,signal:controller.signal,retryFailed:run.origin==='manual'||run.origin==='bulk'}
       if(setting.mode==='main-fork'){
         const stored=store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='fork_summary_plans'").get()&&store.db.prepare('SELECT plan FROM fork_summary_plans WHERE run_id=?').get(runId)
-        return await generateMainFork(store,session,{...options,env,explicit:!!backend,force:run.origin==='manual'||run.origin==='bulk',queuedPlan:stored?JSON.parse(stored.plan):null})
+        const result=await generateMainFork(store,session,{...options,env,retry:true,explicit:!!backend,force:run.origin==='manual'||run.origin==='bulk',queuedPlan:stored?JSON.parse(stored.plan):null,...(nativeSummarize?{summarize:nativeSummarize}:{})})
+        // A large pre-compaction gap may require several bounded supplements.
+        // Continue only after the previous batch actually advanced coverage.
+        if(result.recoveryPending&&shouldContinue()&&!controller.signal.aborted){
+          const next=enqueueSummary(store,session,{backend,origin:'hook',env})
+          if(next.added)result.recoveryQueued=true
+        }
+        return result
       }
       if(setting.mode==='api')return await buildHierarchy(store,session,{...options,model:setting.model||env.SUPERLCM_CLAUDE_MODEL,apiKey:api?api.apiKey:store.apiCredential(session,env),apiProvider:setting.api_provider||'anthropic',apiURL:setting.api_url||env.SUPERLCM_CLAUDE_API_URL,effort:setting.effort||setting.api_effort||null,fallbacks:api?[]:store.apiFallbacks(session,env)})
       const tool=writerTool(store.metadata(session).harness,env)

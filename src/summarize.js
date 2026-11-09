@@ -1,5 +1,7 @@
 import {legacyDshSource} from './dsh-evidence.js'
-import {claudeCheckpoints} from './claude-checkpoints.js'
+import {hasUnrepresentedContent} from './source-completeness.js'
+import {claudeCheckpoints,claudeCompactionNodes} from './claude-checkpoints.js'
+import {coveredThrough} from './compaction.js'
 import { profileKey, readSummaryProfile, updateSummaryProfile, visibleOutputRoom, adaptiveSummaryTask, fitSummary, isReducedSummary, reducedNotice } from './summary-generation.js'
 import { readOpenAICompletion, readSummaryJson, readSummaryText, summaryFailure, STREAM_COMPLETE } from './summary-response.js'
 import { createHash, randomUUID } from 'node:crypto'
@@ -112,6 +114,11 @@ const budgetFor=(saved,options={})=>{
   const tokens=options.targetTokens===undefined?(options.targetChars===undefined?saved.target_tokens:null):options.targetTokens
   return tokens!=null?{target:tokens,tokens:true}:{target:options.targetChars??saved.target_chars,tokens:false}
 }
+// Old Claude leaves remain useful for navigation, but cannot authorize a cut.
+// Rebuild from the first gap in proven coverage, including rescue checkpoints.
+const nextSummaryStart=(store,session,done)=>store.metadata(session).harness==='claude-code'
+  ? coveredThrough(claudeCompactionNodes(store,session))+1
+  : done.length?Math.max(...done.map(n=>n.last))+1:0
 // Index of the last event in the segment starting at `from`, or -1 while the segment is still open.
 // A segment closes before the message that would push it past the target, so it never exceeds the
 // target unless one message alone is longer (that message then forms its own segment).
@@ -166,23 +173,32 @@ export function summaryWork(store, session, options = {}) {
   if(legacyDshSource(store.db,session))return null
   const fallback=()=>recentUserTexts(store,session)
   const saved = store.tuning()
+  const claude=store.metadata(session).harness==='claude-code'
   const { batchSize = segmentMessages(), fanout = saved.fanout } = options
   const budget=budgetFor(saved,options)
   const done = [...store.nodeRows(session, 0),...claudeCheckpoints(store,session)].sort((a,b)=>a.last-b.last)
-  const start = done.length ? Math.max(...done.map(n => n.last)) + 1 : 0
-  const events = summaryEvents(store, session, start)
+  let start = nextSummaryStart(store,session,done)
+  let events = summaryEvents(store, session, start)
+  for(;;){
   let end = segmentEnd(events, 0, budget, batchSize)
   const flush=store.summaryFlush?.(session)
   if(end<0&&flush!==null&&flush!==undefined)end=flushEnd(events,0,flush)
-  if (end >= 0) {
+  if (end < 0) break
   const batch = events.slice(0, end + 1)
   const language=detectSummaryLanguage(store.source(session).kind==='text'?excerptUserTexts(batch.map(e=>store.exact(session,e.ordinal)).join('')):batch.map(e=>store.exact(session,e.ordinal)).filter(raw=>!isRequestCopy(raw)).map(userTextFromRecord),fallback)
-  const digest = hash(JSON.stringify([SUMMARY_POLICY_VERSION,language.code,...batch.map(e => e.digest)]))
+  const digest = hash(JSON.stringify([SUMMARY_POLICY_VERSION,...(claude?['claude-coverage-v4']:[]),language.code,...batch.map(e => e.digest)]))
   const base = { session, batch_id: nodeId(session, 0, batch[0].ordinal, batch.at(-1).ordinal, digest), level: 0, first: batch[0].ordinal, last: batch.at(-1).ordinal, children: [], digest,
     ...(store.metadata(session).harness==='dsh'?{source_records:batch.filter(visibleEvent).map(e=>e.ordinal)}:{}) }
-  const previous=done.filter(n=>n.last<base.first).at(-1)
+  const previous=done.filter(n=>n.last<base.first&&(store.metadata(session).harness!=='claude-code'||!n.sourceIncomplete)).at(-1)
   const task={...base,language,requireHeading:true,kind:'leaf',policy_version:SUMMARY_POLICY_VERSION,
+    reducedSources:batch.some(e=>hasUnrepresentedContent(store.exact(session,e.ordinal),store.source(session).kind,{strictRecords:store.metadata(session).harness==='claude-code'}))||batch.filter(visibleEvent).some(e=>recordText(e,budget)!==e.summaryText),
     ...(previous?{previousSummary:`[${previous.id}, events ${previous.first}-${previous.last}]\n${previous.summary}`}:{})}
+  // An already recorded unrepresentable segment remains untrusted. Skip that
+  // exact failed coverage for archive work, rather than buying it repeatedly.
+  const prior=store.node(session,task.batch_id)
+  if(prior&&(task.reducedSources||store.nodeSourceIncomplete(session,prior))){
+    start=batch.at(-1).ordinal+1;events=summaryEvents(store,session,start);continue
+  }
   // The conversation's own AI, asked right after this part happened and with no compaction since, still has
   // it in context: send only where it starts and ends instead of the text again.
   if (options.recent && batch[0].ordinal >= store.lastCompaction(session)) {
@@ -198,14 +214,19 @@ export function summaryWork(store, session, options = {}) {
   for (let level = 1; level <= 12; level++) {
     const lower = store.nodeRows(session, level - 1)
     if (lower.length < fanout) break
-    const owned = new Set(store.nodeRows(session, level).flatMap(n => JSON.parse(n.children)))
-    const batch=selectSummaryMerge(lower,owned,{fanout,targetTokens:budget.tokens?budget.target:null})
+    const parents=store.nodeRows(session, level),opts={fanout,targetTokens:budget.tokens?budget.target:null,requireContiguous:claude}
+    const trusted=claude?lower.filter(n=>!n.sourceIncomplete):lower
+    const owned = new Set(parents.filter(n=>!claude||!n.sourceIncomplete).flatMap(n => JSON.parse(n.children)))
+    let batch=selectSummaryMerge(trusted,owned,opts)
+    // Incomplete history may still form a navigation-only hierarchy. Such a
+    // parent never proves coverage and cannot consume trusted children's slots.
+    if(!batch&&claude)batch=selectSummaryMerge(lower,new Set(parents.flatMap(n=>JSON.parse(n.children))),opts)
     if(!batch)continue
     const language=detectSummaryLanguage(fallback())
     const digest = hash(JSON.stringify([SUMMARY_POLICY_VERSION,language.code,...batch.map(n => [n.id,n.digest,hash(n.summary)])]))
     const content = mergeContent(batch)
     if (content.length > MAX_SUMMARY_INPUT) throw new Error('Complete child summaries exceed the input limit; refusing to truncate them')
-    const task = { language, requireHeading:true, reducedSources:batch.some(n=>isReducedSummary(n.summary)), level, kind:'condensed', first:batch[0].first, last:batch.at(-1).last,
+    const task = { language, requireHeading:true, reducedSources:batch.some(n=>n.sourceIncomplete || isReducedSummary(n.summary)), level, kind:'condensed', first:batch[0].first, last:batch.at(-1).last,
       ...(budget.tokens?{targetTokens:Math.max(128,Math.min(1200,Math.floor(estimateSummaryTokens(content)/2)))}:{}) }
     const sources=store.metadata(session).harness==='dsh'?store.db.prepare('SELECT DISTINCT seq FROM dsh_node_sources WHERE session=? AND id IN ('+batch.map(()=>'?').join(',')+') ORDER BY seq').all(session,...batch.map(n=>n.id)).map(r=>r.seq):undefined
     return { session, batch_id: nodeId(session, level, task.first, task.last, digest), ...task, children: batch.map(n => n.id), digest,source_records:sources,
@@ -217,7 +238,7 @@ export function summaryWork(store, session, options = {}) {
 export function summaryEstimate(store, session, options={}) {
   const tuning=store.tuning(),{fanout}=tuning,budget=budgetFor(tuning,options)
   const done = [...store.nodeRows(session, 0),...claudeCheckpoints(store,session)].sort((a,b)=>a.last-b.last)
-  const start = done.length ? Math.max(...done.map(n => n.last)) + 1 : 0
+  const start = nextSummaryStart(store,session,done)
   const events = summaryEvents(store, session, start)
   let segments = 0, from = 0
   for (let end; (end = segmentEnd(events, from, budget, options.batchSize??segmentMessages())) >= 0; from = end + 1) segments++
@@ -306,7 +327,7 @@ export async function buildHierarchy(store, session, { model, apiKey, baseURL, a
       checkLease()
       if (!mayContinue()){outcome='stopped';stopReason='settings-changed';return { session, created, stopped:stopReason }}
       verify()
-      store.addNode({ session, id: work.batch_id, level: work.level, first: work.first, last: work.last, children: work.children, summary, digest: work.digest, model:usedModel,sourceRecords:work.source_records }, { leaseOwner: owner,validate:mayContinue })
+      store.addNode({ session, id: work.batch_id, level: work.level, first: work.first, last: work.last, children: work.children, summary, digest: work.digest, model:usedModel,sourceComplete:!work.reducedSources,sourceRecords:work.source_records }, { leaseOwner: owner,validate:mayContinue })
       if (!store.renewLease(session, leaseDurationMs, owner)) throw new Error('Summary writer lost its lease')
       store.completeSummaryBatch(session,work.batch_id,revision)
       activeWork=null

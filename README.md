@@ -27,6 +27,8 @@ Claude Code, Pi and DSH share the same Compression controls: takeover, replaceme
 
 Source granularity defaults to about 20,000 estimated tokens, with four adjacent children per parent. Every level is requested in the same response and atomically saved after source and completeness checks. Cache hits are measured from provider usage, never guaranteed. See [architecture and verification](docs/MAIN-FORK.md).
 
+Pi and DSH reuse saved blocks across compactions and merge adjacent blocks of the same granularity using the configured fanout. Each background response writes only new blocks, required parents and the current continuation overview. Existing blocks stay unchanged; overviews are stored separately, avoiding an extra historical level on every replacement. Earlier overviews remain searchable.
+
 Start with the [installation package](docs/RELEASE.md), run `superlcm web`, and choose your tool under **Tools**. Claude Code users can also [install the Claude plugin](#install-as-a-claude-plugin) and open `/superlcm:console`. The DSH plugin is bundled with SuperLcm: connect once globally and reload dsh harness to see SuperLcm under Plugins. No separate dsh-superlcm installation is needed; see [dsh harness setup](docs/DSH.md).
 
 ## Move a whole conversation, summaries and all, into another tool
@@ -53,13 +55,21 @@ flowchart LR
 
 Before the normal preparation point, SuperLcm archives originals. At preparation, it fixes a safe older range and plans the whole tree. One model request returns all source summaries and their parent summaries together. **A 20K-token block describes source granularity; it is not a separate model call.** The main conversation continues during preparation, and replacement reads the saved result.
 
-“One response” means one successful preparation task. A later task can prepare a newly eligible range; failed or invalidated work can be retried. Capacity protection can start preparation earlier. With takeover off, summaries stay available for archive lookup and the host manages its own context. Explicit independent API mode keeps its separate background batch writer. Cache usage follows provider receipts.
+“One response” means one successful preparation task. A later task can prepare a newly eligible range; failed or invalidated work can be retried. If a sudden increase leaves an already prepared summary unable to make enough space, capacity protection pauses the request and can prepare a wider range. With takeover off, summaries stay available for archive lookup and the host manages its own context. Explicit independent API mode keeps its separate background batch writer. Cache usage follows provider receipts.
+
+With Pi or DSH takeover and main-model branches, an attempt times out after ten minutes without meaningful output; it may continue longer while the model streams text or reasoning. Failures retry automatically in the background with increasing waits, capped at five minutes between attempts; there is no overall retry time or attempt limit. At the capacity guard, the current request stays saved and paused until a validated summary can replace the selected source. User cancellation, settings or model changes, source invalidation, and engine shutdown cancel the old job. Invalid or late results never replace originals. Pi waits for a fresh provider request when the captured prefix or model no longer matches.
+
+Pi and DSH ratios use the full model context window: a 500K window prepares at 350K and replaces at 400K with the default ratios. Output reservation does not reduce those thresholds. During takeover, effective output limits leave safe space at replacement. Pi changes outgoing payloads while preserving the model configuration; DSH uses the native request waterfall and restores the saved ceiling when takeover ends. If preparation is still retrying at the capacity guard, the current request waits. Oversized new input or tools can still trigger earlier capacity protection.
+
+Pi treats the whole-tree target in the prompt as a planning goal. A complete tree may exceed that goal within the actual request output limit; its root is independently checked against the replacement budget. Retry status retains the last failure reason while a new attempt runs.
+
+On a near-full Pi resume, SuperLcm first looks for a prepared result. If a new capture is needed, it captures the request before blocking its delivery and prepares a background branch. When the full conversation leaves no room for the directive, it may branch at the selected earlier history boundary; complete messages and the unsummarized tail remain preserved. Capacity recovery can reduce the recent-original target. After this cold recovery installs the summary, submit “continue” to resume the saved request.
 
 ## Optional compaction takeover for Claude Code
 
-Claude Code takeover uses its configured replacement threshold, 300K tokens by default, with preparation scheduled before that threshold. The latest 40K tokens stay verbatim by default, and complete originals remain available. Branch mode only reads prepared summaries at replacement; missing safe coverage or boundaries return control to native Claude compaction.
+When enabled from the Compression page, Claude Code takeover defaults to replacement at 80% of the model window, with preparation ten percentage points earlier. Older absolute-token settings, including the CLI default of 300K, remain in effect until a ratio is saved. The latest 40K tokens stay verbatim by default, and complete originals remain available. Branch mode only reads prepared summaries at replacement; missing safe coverage or boundaries return control to native Claude compaction.
 
-Takeover is off by default. Enable it under **Tools → Optional context compaction → Claude Code**. The Claude plugin provides capture hooks, four recall tools, the compaction module and `/superlcm:console`. The module requires Claude Code 2.1.286+; the console reports local capabilities.
+Takeover is off by default. Enable it under **Compression → Claude Code**. The Claude plugin provides capture hooks, four recall tools, the compaction module and `/superlcm:console`. The module requires Claude Code 2.1.286+; the console reports local capabilities.
 
 ## Shorter context, preserved originals
 

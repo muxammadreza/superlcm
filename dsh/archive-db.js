@@ -28,6 +28,7 @@ const node=row=>({...row,children:JSON.parse(row.children),sources:JSON.parse(ro
 export class ArchiveDatabase {
   constructor(path) {
     this.db=new DatabaseSync(path);this.db.exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;
+      CREATE TABLE IF NOT EXISTS deleted_sessions(session TEXT PRIMARY KEY,deleted_ms INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS sl_sessions(id TEXT PRIMARY KEY,title TEXT NOT NULL,header TEXT NOT NULL,updatedAt INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS sl_events(session TEXT NOT NULL,seq INTEGER NOT NULL,event TEXT NOT NULL,digest TEXT NOT NULL,text TEXT NOT NULL,tokens INTEGER NOT NULL,original INTEGER NOT NULL,PRIMARY KEY(session,seq));
       CREATE INDEX IF NOT EXISTS sl_events_original ON sl_events(session,original,seq);
@@ -43,6 +44,7 @@ export class ArchiveDatabase {
     const id=sessionId(header.id)
     this.db.exec('BEGIN IMMEDIATE')
     try {
+      if(this.db.prepare('SELECT 1 FROM deleted_sessions WHERE session=?').get('dsh-'+id)){this.db.exec('COMMIT');return {skipped:'deleted'}}
       const prior=this.db.prepare('SELECT header,title,updatedAt FROM sl_sessions WHERE id=?').get(id)
       const identity=JSON.stringify(archiveHeader(prior?JSON.parse(prior.header):null,header))
       if(legacySource)this.verifyLegacyPrefix(id,legacyEvents)
@@ -65,6 +67,7 @@ export class ArchiveDatabase {
     if(recovery.mode!=='physical-order'||!Array.isArray(entries))throw Error('旧会话恢复记录无效')
     this.db.exec('BEGIN IMMEDIATE')
     try{
+      if(this.db.prepare('SELECT 1 FROM deleted_sessions WHERE session=?').get('dsh-'+id)){this.db.exec('COMMIT');return {skipped:'deleted'}}
       const prior=this.db.prepare('SELECT header,title,updatedAt FROM sl_sessions WHERE id=?').get(id)
       const identity=JSON.stringify(archiveHeader(prior?JSON.parse(prior.header):null,header))
       this.verifyLegacyPrefix(id,entries.map(x=>x.event))
@@ -109,7 +112,7 @@ export class ArchiveDatabase {
     return {sequenceMode:'physical-order',items:rows.slice(0,count).map(x=>({seq:x.ordinal,sourceRow:x.sourceRow,sourceSeq:JSON.parse(x.event).seq,type:JSON.parse(x.event).type,text:x.event})),next:rows.length>count?rows[count].ordinal:null}
   }const rows=this.db.prepare('SELECT seq,event FROM sl_events WHERE session=? AND seq>=? ORDER BY seq LIMIT ?').all(sessionId(id),offset(from),limit(count)+1);return {items:rows.slice(0,count).map(x=>({seq:x.seq,type:JSON.parse(x.event).type,text:x.event})),next:rows.length>count?rows[count].seq:null}}
   sourceRows(id,from=0){return this.db.prepare('SELECT seq AS ordinal,seq,event,text,tokens FROM sl_events WHERE session=? AND seq>=? AND original=1 ORDER BY seq').all(sessionId(id),offset(from))}
-  nodes(id,level){return this.db.prepare('SELECT * FROM sl_nodes WHERE session=?'+(level===undefined?'':' AND level=?')+' ORDER BY first,createdAt').all(...(level===undefined?[sessionId(id)]:[sessionId(id),level])).map(node)}
+  nodes(id,level){return this.db.prepare('SELECT * FROM sl_nodes WHERE session=?'+(level===undefined?'':' AND level=?')+' ORDER BY first,createdAt').all(...(level===undefined?[sessionId(id)]:[sessionId(id),level])).map(row=>{const value=node(row);if(this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='sl_node_native'").get())Object.assign(value,this.db.prepare('SELECT nativeId,kind FROM sl_node_native WHERE session=? AND id=?').get(id,value.id)||{});return value})}
   outline(id){const nodes=this.nodes(id),covered=new Set(nodes.filter(n=>n.level===0).flatMap(n=>n.sources)),rows=this.sourceRows(id),s=this.db.prepare('SELECT title FROM sl_sessions WHERE id=?').get(id);return {session:id,title:s?.title||id,nodes,total:rows.length,uncovered:rows.filter(e=>!covered.has(e.seq)).length}}
   find({session,query,offset:from=0,limit:count=20}={}){if(typeof query!=='string'||!query.trim()||query.length>500)throw Error('请输入搜索内容');const args=session?[sessionId(session),query,limit(count)+1,offset(from)]:[query,limit(count)+1,offset(from)]
     const rows=this.db.prepare(`SELECT * FROM (
@@ -118,7 +121,7 @@ export class ArchiveDatabase {
     ) WHERE ${session?'session=? AND ':''}instr(lower(text),lower(?))>0 ORDER BY session,seq LIMIT ? OFFSET ?`).all(...args)
     return {items:rows.slice(0,count),next:rows.length>count?from+count:null}}
 
-  lease(id,revision){const owner=randomUUID(),now=Date.now();const row=this.db.prepare(`INSERT INTO sl_jobs(session,owner,revision,expires) VALUES(?,?,?,?) ON CONFLICT(session) DO UPDATE SET owner=excluded.owner,revision=excluded.revision,expires=excluded.expires WHERE sl_jobs.expires<? AND sl_jobs.retry<=? RETURNING owner`).get(sessionId(id),owner,revision,now+45000,now,now);return row?.owner===owner?owner:null}
+  lease(id,revision){const owner=randomUUID(),now=Date.now(),key=sessionId(id);const row=this.db.prepare(`INSERT INTO sl_jobs(session,owner,revision,expires) SELECT ?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM deleted_sessions WHERE session=?) ON CONFLICT(session) DO UPDATE SET owner=excluded.owner,revision=excluded.revision,expires=excluded.expires WHERE sl_jobs.expires<? AND sl_jobs.retry<=? RETURNING owner`).get(key,owner,revision,now+45000,'dsh-'+key,now,now);return row?.owner===owner?owner:null}
   renew(id,owner){return this.db.prepare('UPDATE sl_jobs SET expires=? WHERE session=? AND owner=?').run(Date.now()+45000,id,owner).changes===1}
   release(id,owner,failed=false){this.db.prepare('UPDATE sl_jobs SET expires=0,retry=? WHERE session=? AND owner=?').run(failed?Date.now()+60000:0,id,owner)}
   saveNode(id,work,summary,owner,revision,currentRevision){this.db.exec('BEGIN IMMEDIATE');try{const job=this.db.prepare('SELECT * FROM sl_jobs WHERE session=?').get(id);if(job?.owner!==owner||job.expires<Date.now()||job.revision!==revision||currentRevision()!==revision)throw Error('摘要设置或任务已变化')
@@ -133,6 +136,9 @@ export class ArchiveDatabase {
       for(const n of nodes){
         if(!n.sources.length)throw Error('摘要缺少原文范围')
         this.db.prepare('INSERT OR IGNORE INTO sl_nodes VALUES(?,?,?,?,?,?,?,?,?)').run(id,n.id,n.level,Math.min(...n.sources),Math.max(...n.sources),n.summary,JSON.stringify(n.children),JSON.stringify(n.sources),Date.now())
+        this.db.prepare('UPDATE sl_nodes SET level=? WHERE session=? AND id=?').run(n.level,id,n.id)
+        if(n.nativeId||n.kind){this.db.exec('CREATE TABLE IF NOT EXISTS sl_node_native(session TEXT,id TEXT,nativeId TEXT,kind TEXT,PRIMARY KEY(session,id))');this.db.prepare('INSERT INTO sl_node_native VALUES(?,?,?,?) ON CONFLICT(session,id) DO UPDATE SET kind=excluded.kind').run(id,n.id,n.nativeId||null,n.kind||null)}
+        if(n.modelSummary){this.db.exec('CREATE TABLE IF NOT EXISTS sl_summary_variants(session TEXT,id TEXT,summary TEXT,PRIMARY KEY(session,id))');this.db.prepare('INSERT OR IGNORE INTO sl_summary_variants VALUES(?,?,?)').run(id,n.id,n.modelSummary)}
       }
       if(receipt){
         this.db.exec('CREATE TABLE IF NOT EXISTS sl_fork_receipts(session TEXT PRIMARY KEY,provider TEXT,model TEXT,usage TEXT NOT NULL,at_ms INTEGER NOT NULL)')

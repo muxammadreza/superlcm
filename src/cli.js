@@ -6,7 +6,7 @@ import { codexTranscript, codexSessionKey } from './codex.js'
 import { nativeConversationName } from './conversation-names.js'
 import { buildHierarchy, summaryWork, summarySettingsRevision } from './summarize.js'
 import { SUMMARY_SYSTEM, buildSummaryPrompt, summaryPromptParts, checkedSummary } from './summary-policy.js'
-import { summarizeWith, writerTool, WRITER_CLI } from './cli-writers.js'
+import { summarizeWith, writerTool, hostWriterTool, WRITER_CLI } from './cli-writers.js'
 import { startServer } from './mcp.js'
 import { claudePluginEnabled } from './runtime.js'
 import { startWeb, defaultPort } from './web.js'
@@ -157,7 +157,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
           const file=input.transcript_path && existsSync(input.transcript_path) ? (codex ? codexTranscript(input.transcript_path,{cwd:input.cwd}) : claudeTranscript(input.transcript_path)) : null
           const shouldIndex=['Stop','PostCompact','SessionEnd','SessionStart','UserPromptSubmit'].includes(event)
           // A conversation the user deleted in SuperLcm is not captured again automatically.
-          if (shouldIndex && file && !store.isDeleted(session)) result=store.ingest(session,file)
+          if (shouldIndex && file && !store.isDeleted(session)) result=store.ingest(session,file,'jsonl',{automatic:true})
           if (store.source(session)) {
             store.markClient(codex?'codex':'claude-code','hook')
             const title=nativeConversationName(store,{harness:codex?'codex':'claude-code',id:input.session_id,file:file||store.source(session).path})
@@ -265,9 +265,10 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
     if(!setting.enabled)reply={use:false,reason:'compaction takeover is off'}
     else if(!src||store.isDeleted(session))reply={use:false,reason:'conversation not recorded by SuperLcm'}
     else {
-      if(existsSync(src.path))store.ingest(session,src.path) // the newest turns, written since the last hook
+      if(existsSync(src.path)&&store.ingest(session,src.path,'jsonl',{automatic:true}).skipped)throw Error('conversation deleted during capture') // newest turns
       const {planCompaction}=await import('./compaction.js')
       const {verifiedCompactionInput}=await import('./claude-compaction-input.js')
+      const {verifiedActiveMessages,verifiedCompactionCut}=await import('./claude-rescue-source.js')
       const plan=(target=session)=>{
         const current=store.takeover()
         if(!current.enabled)return {use:false,reason:'compaction takeover is off'}
@@ -276,7 +277,11 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
         // Sizes are planned against where Claude Code compacts. An automatic compaction starts there, so the context
         // now bounds it whatever the settings say: a packet planned for a larger window would compact again at once.
         const at=claudeCompactAt(current,input.window||0),window=input.trigger==='auto'&&input.tokens>0?Math.min(at,input.tokens):at
-        return planCompaction({meta:store.metadata(target),events:context.events,nodes:claudeCompactionNodes(store,target),messages:context.messages,instructions:input.instructions||'',tokens:input.tokens||0,window,keepTokens:current.keep,trigger:input.trigger})
+        const result=planCompaction({meta:store.metadata(target),events:context.events,nodes:claudeCompactionNodes(store,target),messages:context.messages,instructions:input.instructions||'',tokens:input.tokens||0,window,keepTokens:current.keep,trigger:input.trigger})
+        const active=result.use?verifiedActiveMessages(store,target,input.messages||[],{requireLatest:false}):null
+        return result.use&&!verifiedCompactionCut(active,result)
+          ? {use:false,reason:'the live conversation is not fully verified in the archive; use native compaction'}
+          : result
       }
       // A compaction after the cache expired that does not happen leaves no record: nothing compacted natively.
       // Coverage is that of the conversation whose summaries the packet uses (the parent's for stage 'parent').
@@ -318,7 +323,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
       if(input.trigger!=='precompute'&&!quiet&&!input.afterCatchup&&!reply.use&&!reply.ambiguous&&reply.stage!=='inline'&&!reply.inline&&eligible){
         const pending=pendingLeaves(store,session),deadlineMs=catchupDeadlineMs(),chosen=effective(store,session),harness=store.metadata(session).harness
         if(deadlineMs>0&&pending>=1&&pending<=4&&store.integrationEnabled(harness)&&['cli','api'].includes(chosen.mode)){
-          if(chosen.mode==='cli'&&writerTool(harness)==='claude-code')reply={...reply,catchup:{host:true,deadlineMs,maxPieces:4}}
+          if(chosen.mode==='cli'&&hostWriterTool(harness)==='claude-code')reply={...reply,catchup:{host:true,deadlineMs,maxPieces:4}}
           else {
             const started=Date.now()
             try{await catchUp(store,session,{deadlineMs,maxPieces:4})}catch{}
@@ -332,7 +337,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
       if(!reply.use&&!reply.ambiguous&&mayWrite&&['coverage_lag','uncovered_oldest','no_summaries','context_too_large'].includes(compactionDiagnostic(reply).code)){
         const work=summaryWork(store,session),revision=summarySettingsRevision(store,session)
         if(work&&!store.summaryRetry(session,work.batch_id,revision)){
-          reply.retry=chosen.mode==='cli'&&writerTool(harness)==='claude-code'?'host':true
+          reply.retry=chosen.mode==='cli'&&hostWriterTool(harness)==='claude-code'?'host':true
           if(reply.retry!=='host'&&!reply.catchup)try{
             const scheduled=scheduleSummary(store,session,chosen.mode,chosen.model)
             if(!scheduled&&!store.summarizing(session)&&!activeSummaryRun(store,session))delete reply.retry
@@ -419,7 +424,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
       const src=store.source(session)
       if(!src||store.isDeleted(session))throw Object.assign(new Error('conversation not recorded by SuperLcm'),{none:true})
       const {mode,model}=effective(store,session)
-      if(mode!=='cli'||writerTool(store.metadata(session).harness)!=='claude-code')throw Object.assign(new Error('summaries are not written by Claude Code for this conversation'),{none:true})
+      if(mode!=='cli'||hostWriterTool(store.metadata(session).harness)!=='claude-code')throw Object.assign(new Error('summaries are not written by Claude Code for this conversation'),{none:true})
       if(command==='summary-check'){
         const input=await readHook(),claim=store.db.prepare('SELECT * FROM host_summary_claims WHERE session=?').get(session)
         const revision=summarySettingsRevision(store,session)
@@ -430,7 +435,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
       }else if(command==='summary-claim'){
         store.recoverSummaryRuns()
         store.setHostWriter(session,true)
-        if(existsSync(src.path))store.ingest(session,src.path)
+        if(existsSync(src.path)&&store.ingest(session,src.path,'jsonl',{automatic:true}).skipped)throw Error('conversation deleted during capture')
         const leafOnly=rest.includes('--leaf'),deadlineAt=rest.indexOf('--deadline'),deadline=deadlineAt<0?0:Number(rest[deadlineAt+1])
         if(!Number.isSafeInteger(deadline)||deadline<0||(deadline&&deadline<=Date.now()))throw Object.assign(Error('Catch-up deadline reached'),{none:true})
         const work=summaryWork(store,session,{leafOnly}),revision=summarySettingsRevision(store,session)
@@ -477,7 +482,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
           if(work.level===0)for(let i=work.first;i<=work.last;i++)store.exact(session,i)
           persistence=true
           retainHostDraft(store,session,work,claim,input,summary)
-          store.addNode({session,id:work.batch_id,level:work.level,first:work.first,last:work.last,children:work.children,summary,digest:work.digest,model:`claude-code-host:${String(input.model||'configured').slice(0,80)}`},{leaseOwner:'host',validate:current})
+          store.addNode({session,id:work.batch_id,level:work.level,first:work.first,last:work.last,children:work.children,summary,sourceComplete:!work.reducedSources,digest:work.digest,model:`claude-code-host:${String(input.model||'configured').slice(0,80)}`},{leaseOwner:'host',validate:current})
           store.completeSummaryBatch(session,work.batch_id,claim.revision)
           if(claim.run_id){progressSummaryRun(store,claim.run_id,'host:'+claim.claim_id,{created:1});finishSummaryRun(store,claim.run_id,{owner:'host:'+claim.claim_id,state:'done'})}else store.setStatus(session,'ok')
           reply={saved:true,more:Boolean(summaryWork(store,session))}

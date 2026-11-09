@@ -49,6 +49,36 @@ test('heartbeat, stale process and shutdown are different from configured compac
     reporter.close(); assert.equal(compressionSnapshot(store, { now, alive: () => true }).runtimes[0].phase, 'stopped')
   } finally { reporter.close(); store.close() }
 })
+test('live retry jobs remain visible during large archive scans and terminal states clear their next retry',()=>{
+  const store=fixture();let now=100000
+  const engine=new CompressionReporter(store.db,{kind:'engine',enabled:true,clock:()=>now})
+  const archive=new CompressionReporter(store.db,{kind:'archive',enabled:true,clock:()=>now})
+  try{
+    engine.report('waiting-session','retrying',{start:0,end:25,attempt:8,failures:8,retryAt:200000,errorKind:'timeout'})
+    for(let i=0;i<100;i++){now++;archive.report('archive-'+i,'synced')}
+    let s=compressionSnapshot(store,{now,alive:()=>true}),job=s.jobs[0]
+    assert.equal(s.jobs.length,20);assert.equal(job.session,'waiting-session')
+    assert.equal(job.attempt,8);assert.equal(job.failures,8)
+    assert.equal(job.retry_at,200000);assert.equal(job.error_kind,'timeout')
+    engine.report('waiting-session','summarizing',{attempt:9,failures:8})
+    job=compressionSnapshot(store,{now,alive:()=>true}).jobs[0]
+    assert.equal(job.attempt,9);assert.equal(job.retry_at,null);assert.equal(job.error_kind,null)
+    assert.deepEqual({...job.last_failure},{attempt:8,error_kind:'timeout',at_ms:100000},'the previous failure remains visible during the next attempt')
+    engine.report('waiting-session','retrying',{attempt:9,failures:9,retryAt:300000,errorKind:'quota'})
+    engine.report('waiting-session','cancelled')
+    job=compressionSnapshot(store,{now,alive:()=>true}).jobs.find(j=>j.session==='waiting-session')
+    assert.equal(job.phase,'cancelled');assert.equal(job.retry_at,null)
+    engine.report('waiting-session','summarizing')
+    const fresh=compressionSnapshot(store,{now,alive:()=>true}).jobs[0]
+    assert.equal(fresh.attempt,undefined,'a new legacy job must not inherit retry diagnostics')
+    assert.equal(fresh.last_failure,undefined)
+    engine.report('waiting-session','cancelled')
+    engine.close();now++;archive.report('newer-scan','synced')
+    assert.equal(compressionSnapshot(store,{now,alive:()=>true}).jobs[0].session,'newer-scan')
+    store.db.exec('DROP TABLE superlcm_compression_retry')
+    assert.doesNotThrow(()=>compressionSnapshot(store,{now,alive:()=>true}),'older runtime schema stays readable')
+  }finally{engine.close();archive.close();store.close()}
+})
 test('DSH connection needs matching live engine and archive, not old summary records', async () => {
   const store = fixture(), env = { ...process.env, DSH_HOME: join(store.dir, 'dsh'), SUPERLCM_DSH_BIN: process.execPath }
   const dir = join(env.DSH_HOME, 'profiles/web'); mkdirSync(join(dir,'node_modules/superlcm-mcp'),{recursive:true})

@@ -1,4 +1,6 @@
 import { summarizeMainFork } from './main-fork.js'
+import {retryFork} from './fork-retry.js'
+import {registerOutputBudget} from './output-budget.js'
 import {SUMMARY_POLICY_VERSION} from '../src/summary-policy.js'
 import { randomUUID } from 'node:crypto'
 import { nativePreStep, registerRequestBoundary } from './request-boundary.js'
@@ -95,6 +97,7 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
     registerRequestBoundary(this)
     this.watchVolatileConfig(ctx)
     watchControls(this,ctx,config.controlFile,controls)
+    registerOutputBudget(this,this.superLcmStore,{context:ctx})
     if(config.controlFile&&!this.config.auto)this._registerAutomaticCompaction()
   }
 
@@ -196,8 +199,8 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
     return prepareAsyncRegion(this, agent, selection)
   }
 
-  summarizeBackgroundSelection(agent, prepared, signal) {
-    return this.rollingConfig.summaryMode === 'main-fork' ? summarizeMainFork(this,agent,prepared,signal) : summarizeAsyncRegion(this, agent, prepared, signal)
+  summarizeBackgroundSelection(agent, prepared, signal, capture, attempt) {
+    return this.rollingConfig.summaryMode === 'main-fork' ? summarizeMainFork(this,agent,prepared,signal,capture,attempt) : summarizeAsyncRegion(this, agent, prepared, signal)
   }
 
   commitBackgroundSelection(agent, summarized) {
@@ -247,7 +250,10 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
     this.backgroundControllers.add(controller)
     this.compressionReporter.report(agent.session.id, 'summarizing', { ...selection, start: parts[0]?.start ?? selection.start })
     if (!selection.treeOnly && policy.summaryLeafTargetTokens) prepared.summaryTargetTokens = policy.summaryLeafTargetTokens
-    state.promise = abortable(selection.treeOnly ? Promise.resolve(null) : this.summarizeBackgroundSelection(agent, prepared, controller.signal),controller.signal)
+    const capture=this.mainRequests?.get(agent)
+    const run=attempt=>this.summarizeBackgroundSelection(agent,prepared,controller.signal,capture,attempt)
+    state.promise = abortable(selection.treeOnly ? Promise.resolve(null) : this.rollingConfig.summaryMode==='main-fork'
+      ? retryFork(this,agent,state,policy,run) : run(),controller.signal)
       .then(async (summarized) => {
         controller.signal.throwIfAborted()
         if (this.backgroundFolds.get(agent) !== state || currentPolicy(this, agent)?.signature !== state.signature) return
@@ -276,7 +282,7 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
           if (recovered?.status === 'ready' && recovered.summarized && recovered.generation === this.runtimeGeneration && currentPolicy(this,agent)?.signature === recovered.signature) this.backgroundFolds.set(agent, recovered)
           else this.backgroundFolds.delete(agent)
         }
-        this.summaryGuards.failedSession(agent, fingerprint, policy.summaryRetryCooldownMs)
+        if(!controller.signal.aborted)this.summaryGuards.failedSession(agent, fingerprint, policy.summaryRetryCooldownMs)
         const message = error instanceof Error ? error.message : String(error)
         this.ctx.logger?.warn?.(`rolling compaction background summary failed: ${message}; continuing`)
       })
@@ -296,7 +302,7 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
     const state = pending?.status === 'ready' ? pending : emergency ? pending?.recoveryReady : pending
     if (state && state.cutoffEnd === undefined && (activeTokens >= policy.softActiveTokens || options.force === true)) {
       const measurement = this.ctx.tokenMeter.measure(agent.session)
-      const priced = selectionPricing(measurement, agent.session.requestHeader())
+      const priced = selectionPricing(measurement, agent.session.requestHeader(), agent.session)
       const eligible = selectRollingRange(priced.nodes, agent.session.surface.nodes, { ...policy,
         tailCount: policy.minRetainTokens > 0 ? 1 : policy.tailCount,
         retainTokenBudget: true, activeTokens, forceHard: options.force === true,
@@ -320,7 +326,7 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
     const endIndex = agent.session.surface.nodes.indexOf(state.summarized.end)
     if (endIndex < 0 || endIndex >= protectedIndex) return null
     const checkpointTokens = draftTokens(this, agent, state.frontier)
-    const unfinished = pending !== state || this.planRolling(agent) !== null || checkpointTokens > summaryBudget(policy)
+    const unfinished = pending !== state || this.planRolling(agent) !== null || (this.rollingConfig.summaryMode !== 'main-fork' && checkpointTokens > summaryBudget(policy))
     if (unfinished) {
       // A failed leaf/merge must not strand a usable completed prefix forever.
       // Keep the unfinished range verbatim; only publish the ready prefix when
@@ -333,6 +339,10 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
       saveDraft(this,agent,state)
       const result = this.commitBackgroundSelection(agent, state.summarized)
       if (result === null) return null
+      const captured = this.mainRequests?.get(agent)
+      if (captured && typeof agent.session.deriveMessages === 'function') {
+        captured.request = { ...captured.request, messages: structuredClone(agent.session.deriveMessages()) }
+      }
       if (pending !== state) pending?.controller?.abort(Error('已提交完成的摘要前缀，未完成原文保留'))
       this.backgroundFolds.delete(agent)
       finishDraft(this, agent)
@@ -357,7 +367,7 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
   }
   async settleBackgroundFold(agent) {
     let state
-    while (['summarizing', 'cancelling'].includes((state = this.backgroundFolds.get(agent))?.status)) await state.promise
+    while (['summarizing', 'retrying', 'cancelling'].includes((state = this.backgroundFolds.get(agent))?.status)) await state.promise
   }
   logFoldResult(ctx, result) {
     if (result !== null && typeof result === 'object' && Array.isArray(result.shadowedSeqs)) {
@@ -423,7 +433,7 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
       return { ...staged.selection, treeOnly: true }
     }
     const measurement = this.ctx.tokenMeter.measure(session)
-    const priced = selectionPricing(measurement, session.requestHeader())
+    const priced = selectionPricing(measurement, session.requestHeader(), session)
     const options = {
       tailCount: policy.minRetainTokens > 0 ? 1 : policy.tailCount,
       minRetainTokens: policy.minRetainTokens,

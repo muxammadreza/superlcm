@@ -162,18 +162,20 @@ test('emergency commits the first sufficient completed batch without waiting for
 })
 
 test('emergency progress shares one total deadline across successive healthy batches',async()=>host(async h=>{
-  h.engine.rollingConfig.summaryTimeoutMs=400
-  for(let i=0;i<12;i++)append(h.session,'x'.repeat(38000))
+  h.engine.rollingConfig.summaryTimeoutMs=1200
+  // Leave enough source that several successful batches cannot reach the
+  // capacity target before the shared deadline, even on a fast machine.
+  for(let i=0;i<36;i++)append(h.session,'x'.repeat(38000))
   append(h.session,'Current protected request.')
   const original=structuredClone(h.session.snapshotEvents()),generation=h.session.surface.replaceGeneration
   const controller=new AbortController(),start=Date.now()
   try {
     await assert.rejects(pressureStep(h.engine,h.agent,controller.signal),/后台摘要尚未就绪/)
-    assert.ok(Date.now()-start<900,'new batches cannot renew admission indefinitely')
+    assert.ok(Date.now()-start<2500,'new batches cannot renew admission indefinitely')
     assert.ok(h.calls.length>=2,'the first healthy batch completed before the shared deadline')
     assert.equal(h.session.surface.replaceGeneration,generation);assertRetained(h,original)
   } finally {controller.abort(Error('Stop the preserved test request'));await h.engine.settleBackgroundFold(h.agent)}
-},{reply:async()=>{await new Promise(resolve=>setTimeout(resolve,250));return 'Preserved historical facts.'}}))
+},{reply:async()=>{await new Promise(resolve=>setTimeout(resolve,350));return 'Preserved historical facts.'}}))
 
 test('an insufficient prefix cannot unlock a still oversized main request',async()=>host(async h=>{
   await readyPrefix(h,{tail:360000})

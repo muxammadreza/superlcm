@@ -14,6 +14,43 @@ import { mountCompactionOwner } from '../dsh/compaction-owner.js'
 import { markerFromSummary } from '../dsh/marker.js'
 import { prepareAsyncRegion, summarizeAsyncRegion } from '../dsh/async-region.js'
 import { controlsConfig } from '../dsh/controls-config.js'
+import {SuperLcmStore} from '../dsh/store.js'
+
+for(const explicit of [true,false])test('total-window output protection restores '+(explicit?'explicit':'adapter-default')+' ceiling when takeover is disabled',async()=>{
+ await fixture(async({ctx,owner,agent,signal,session,publish})=>{
+  publish('ratio-output',{auto:true,budgetMode:'ratio',summaryMode:'main-fork',summaryAdapter:null})
+  await owner.reload()
+  assert.equal(owner.mode,'superlcm')
+  const proposed={provider:'chat-provider',model:'chat-model',...(explicit?{maxTokens:128000}:{})}
+  const config=await ctx.waterfall('agent/request',{agent,signal},async()=>proposed)
+  assert.equal(config.maxTokens,51405)
+  session.append('request/header',{header:{config},reason:'change'})
+  const state=ctx.compaction.superLcmStore.outputBudgetState().read(session.id)
+  assert.equal(state.requested,explicit?128000:65536)
+  const again=await ctx.waterfall('agent/request',{agent,signal},async()=>config)
+  assert.equal(again.maxTokens,51405,'repeated steps retain the configured ceiling receipt')
+  const before=session.snapshotEvents()
+  publish('native-after-output');await owner.reload()
+  assert.deepEqual(session.snapshotEvents(),before,'unmounting must not inject request headers into the log')
+  const restored=await ctx.waterfall('agent/request',{agent,signal},async()=>config)
+  assert.deepEqual(restored,proposed,'the next native request restores explicit or adapter-default output configuration')
+ })
+})
+
+test('native owner restores a capped header left by a previous process',async()=>{
+ await fixture(async({ctx,session,agent,signal,dir})=>{
+  const store=new SuperLcmStore(join(dir,'lcm.sqlite'))
+  try{
+   store.outputBudgetState().save({session:session.id,provider:'chat-provider',model:'chat-model',requested:128000,explicit:1,effective:50000,option_max:null,active:1})
+   const config={provider:'chat-provider',model:'chat-model',maxTokens:50000}
+   session.append('request/header',{header:{config},reason:'change'})
+   const restored=await ctx.waterfall('agent/request',{agent,signal},async()=>config)
+   assert.equal(restored.maxTokens,128000)
+   session.append('request/header',{header:{config:restored},reason:'change'})
+   assert.equal(store.outputBudgetState().read(session.id).active,0)
+  }finally{store.close()}
+ })
+})
 
 const tick = () => new Promise(resolve => setImmediate(resolve))
 async function fixture(run, response = async () => 'Current task and exact facts retained.', ownerConfig = {}) {

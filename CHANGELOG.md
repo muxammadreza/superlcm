@@ -1,16 +1,47 @@
 # Changelog
 
-## 0.6.3 — 2026-10-29
+## Fork 0.6.4 — 2026-11-09
+
+- Merge upstream 0.6.1 (unreleased) into the fork. Upstream's Persian/Arabic/Urdu detection (#19) replaces the fork's; the fork's takeover sizing, idle and end-of-turn compaction, main-fork `$.model.fork` writer, fallback summary models and stable-entry fix are kept on top.
+
+## 0.6.1 — unreleased
+
+- 修复 Pi 压缩后把加密思考和工具内部详情当普通文字估算、以及失败轮次 `context_edit` 与同模型重选导致容量误判的问题。通知只在拿到模型回执时显示压缩后用量；`openai-completions` 包装下实际走 `openai-responses` 的同模型响应同样按思考回执预算，不把同一响应的普通工具调用重复计入，也不把 Pi 内部 `details` / `nestedCalls` 计入上下文；删除后续失败轮次的 `context_edit` 与同模型重复 `model_select` 不再丢弃有效用量回执或触发假超限压缩。请求内替换另存压缩前用量供通知读取；Pi 原生检查点字段仍由 Pi 自己计算。
+- 修复 DSH 压缩替换后未按供应商校准系数折算负向增量（遗留虚高估算）、中断的流式回复清空前序真实用量校准锚点、后台分支在容量紧迫或输出截断时未裁掉保留尾部与收缩前缀、高密度校准下已完成的主模型分支摘要被误判为未完成、以及被动归档分支未使用校准用量和剩余输出限额的问题。
+- 修复 Pi 后台分支绕过后置脱敏处理器的问题：在有效 provider 完整执行请求处理链后统一检查，后台和替换请求重跑同一处理链，摘要指令及来源锚点也脱敏。同模型保留已处理请求头，其他模型不复制主模型请求头；后置追加工具与输出改写也要经过最终容量检查。
+- 修复异步请求处理期间切会话的迟到捕获、Google 请求取消信号被克隆成普通对象、独立 API 请求内恢复缺少源消息，以及损坏的供应商完成结果进入无效重试的问题。新增安装版 Pi 的脱敏、后置请求改写和 API 自动回归。
+- 修复 Pi 后台摘要超出窗口时反复重试同一快照。完整请求的工具等固定内容也参与判断，缩窄时实际发送更早的完整前缀；八成步长无可用边界时退回相邻完整边界，未选原文保留。输出空间不足以保留合法思考额度时也会缩窄，参数非法则明确停止；原文前缀、工具或固定请求内容改变后可重新准备。
+- 整理 Pi 摘要调度：统一运行中的条目提交，取消前台时保留已经用于请求的待提交摘要，在途追加输入交还原生队列，原生溢出恢复等待已有任务。生成与保存分开，保存暂时失败不会再买一次摘要；明确拒绝重放和无效完整摘要停止自动重试，截断输出立即缩区。删除一层重复超时，目标比例处不再无条件阻塞安全请求。
+- 修复 Pi 将完整成功的后台摘要误判为输出超额并再次重试：部分中转会移除不支持的输出上限，现以完整供应商回执核对原始输出额度与上下文窗口，缓存输入和思考输出均计入。无法核准窗口时立即缩小完整前缀，不再延时重发同一份请求。
+- Pi 冷恢复可复用因容量缩窄而产生的已完成摘要，不因默认切点不同再次调用模型。复用前核对当前前缀、保留边界和模型设置，已拒绝的草稿不会再次自动装入。
+- 修复 Pi 基于真实回执校准输入时再次加上已完成输出，导致后台准备期间仍可能提前拦住前台的问题。只有完整历史前缀一致且回执来源对应时复用输入用量，新增内容和变更的固定字段继续保守计入。
+- 兼容 OpenAI Responses 与 Anthropic 在最终用户指令之后追加原生思考设置的请求形式，保留该设置，修复分支被误判为格式不支持；同类设置不作为历史对话参与前缀校准。
+- 修复 Pi 摘要遗漏手动命令及失败结果、排除于上下文的命令导致分块无法保存的问题；旧版待安装摘要会重新准备。请求捕获现在有取消和超时保护，SuperLcm 工具查询失败也会正确标记为失败。
+- 修复 Pi 二次压缩时将旧摘要的原生消息与转换后的消息混用，导致已核验的原文被误判不一致；真实变化仍会阻止替换。替换保留近期系统指令的原有顺序；遵守 Pi 禁止图片的设置，后台捕获和摘要分支不会发送被禁用的图片。
+- 修复 Google、Bedrock 和 Pi 原生消息接口的请求结构及输出额度识别；Google 请求保留可用的取消信号。未知请求结构会明确报错并停止重复重试，直至模型或配置改变。
+- 修复 Pi 宿主用量未到准备线、最终请求已逼近窗口时先中断的缺口：在请求发送前核验并等待后台摘要。分支保留原输出配置，按所选前缀独立计算额度，避免继承前台仅剩几百 token 的限额。完整供应商输出回执可纠正本地长度估算偏差，替换根摘要仍独立核验容量。
+- 修复 Pi 将替换目标当成硬输入上限：350K 准备和400K替换仍按宿主用量判断，最终请求按500K实际窗口调整输出预留。到替换点但摘要未完成时，安全请求继续执行；只有真实容量不足才等待。冷启动在完整请求处理链结束后恢复，在当前请求中使用摘要，并通过原生轮次边界保存检查点，无须额外发送“继续”。
+- Pi 摘要失败写入会话诊断记录，保留尝试次数、来源与错误。补充真实窗口、冷启动等待、系统工具保持和原文边界不一致的回归。
+- Pi 加入跨轮分块复用与同粒度合并，沿用 DSH 的增量规划和共享摘要树。旧分块身份及文字不变，只生成新分块、需要合并的父节点和接续总览；总览单独保存，避免每次压缩多堆一层。旧树无法核验时保留可见检查点，缺块或来源重叠时拒绝替换。
+- 修复 Pi 冷启动时容量保护阻止后台恢复、最终请求已安全却仍被旧保护标记中断的问题。已有供应商回执时优先使用宿主用量，无回执时仍计入系统和工具的估算开销；暂停记录触发数值，并区分后台准备、等待重试和固定开销超限。
+- Pi 压缩通知只保留真实错误和一次已安装成功的提示。准备、等待及仅完成草稿时保持静默；成功提示核对原生会话已写入的压缩节点，取消、未写入和跨会话的结果不会误报成功。后台失败诊断仍保留。
+- 兼容 Pi 1.5 会话内的系统提示和工具定义：保留为固定开销，不再混入分支摘要选区或重复计算容量，修复后台摘要一直无法开始、随后保护中断的问题。切换供应商附带的历史交接不再覆盖当前用户的摘要语言。
+- 修复 [#19](https://github.com/yu381792/superlcm/issues/19)：借鉴 @muxammadreza 的补丁，区分明确的波斯语、阿拉伯语和乌尔都语摘要；语言无法确定时保留原有宽泛判断。旧已保存摘要不变，旧版未提交的压缩草稿会重新校验和准备。
+- 全插件复审修复 Claude 替换范围、工具载荷、旧摘要和图片来源校验；证据不足时保留原上下文并交还原生压缩。
+- Pi 与 DSH 不再复用旧算法生成的未提交分支摘要；DSH 即使子节点深度不同也保留模型实际写出的父摘要。这两个宿主的主分支持续输出可延长单次摘要，无有效进展十分钟后重试。
+- 修复 Pi 失败合并重复读坏缓存、DSH 纯归档超时、密钥与设置半提交、原文搜索续页及旧父版本检索。完整范围和未实测边界见 [全插件审查记录](docs/WHOLE-PLUGIN-AUDIT-20261028.md)。
+
+## Fork 0.6.3 — 2026-10-29
 
 - Compact Claude Code conversations at the end of a turn when the next turn would likely cross the compaction threshold. A takeover compaction inside a turn shows SuperLcm's packet in the Claude app as if the person had typed it: Claude Code streams a module's packet as a plain user message, and a module cannot mark it as the compaction summary the way Claude Code marks its own. A `/compact` goes to the app as a replay, which it does not draw. At the end of each turn the module checks whether the context plus what that turn added (at least 15% of the threshold) reaches the threshold, and only from 40% of it. If so, it first checks that SuperLcm can answer with a packet that at least halves the context, then runs `/compact`. That compaction (history trigger "at the end of a turn") is SuperLcm's or skipped, never Claude Code's. A compaction still needed inside a turn is taken over as before.
 
-## 0.6.2 — 2026-10-28
+## Fork 0.6.2 — 2026-10-28
 
 - Fix Claude Code takeover compacting again seconds after a compaction, so the context stayed full. In ratio mode the compaction module reports the model's whole capacity (1M), and the packet was sized for 80% of it (800K), leaving about 200K. Claude Code also applies `autoCompactWindow`, so with 300K it compacts at (300K − 20K) × 80% = 224K: one recorded session compacted three times in 30 seconds, each time from about 225K to 217K. The compaction packet, the flush under context pressure, the idle cold-compaction check and the main-fork preparation point now all use the threshold Claude Code really compacts at, and an automatic compaction is also bounded by the context's current size.
 - Add ordered fallback models to the custom-API summary writer. A tool's card lists up to 5 other saved models; when a piece fails (rate limit, quota, overload, timeout, transport error or a broken answer) the next model writes the same piece, and a model that was rate limited or overloaded is skipped for 60 seconds. Each summary records the model that wrote it. Deleting a model removes it from every list.
 - Fix a session opened before an update pointing `~/.superlcm-claude/superlcm.js`, and with it the console and connected tools, back at its older plugin copy. The entry is left alone while it points at a newer installed copy.
 
-## 0.6.1 — 2026-10-27
+## Fork 0.6.1 — 2026-10-27
 
 - Compact idle Claude Code conversations after their prompt cache expires. Past the cache's lifetime the next prompt writes the whole context to the cache again, so a takeover compaction then costs no cache, only the smaller packet. Expiry is decided from evidence, not a fixed timer: the transcript's last main-thread response, the longest cache lifetime its responses wrote (1 hour or 5 minutes), and every request the compaction module sees billed to the session while it is idle. A `$.model.fork` (SuperLcm's, Claude Code's, or another mod's keep-warm ping) never shows in the transcript but raises the session's cost, so any rise counts as a read of the cache and keeps it warm. The module compacts only when the context is at least 40% of the takeover window and the packet at least halves it. A compaction SuperLcm cannot answer then is skipped, never handed to Claude Code, and not tried again until the next response. It never runs in SuperLcm's own workers.
 - Fix takeover compactions in image-heavy sessions falling back to Claude Code's own as "context too large". The module counted each tool result's raw `result` (an image's base64, an edited file's whole original), which the model never reads. Sizes now count text, tool inputs and tool output text, plus about 1,600 tokens per image. Two recorded fallbacks replayed: about 284K → 62K and 219K → 84K tokens, both now takeovers.
@@ -29,6 +60,19 @@
 - 修复 dsh 新版账户适配器空模型目录导致接入弹窗报错，并兼容新版历史持久化插件的正式生命周期接口。
 
 ## Earlier unreleased changes
+
+- 全插件独立审查后修复来源覆盖、DSH 分层与节点身份、Pi 图片/API/MCP 恢复、固定开销、完整原文搜索、凭证并发与 POSIX 权限、迁移和接入说明。旧分块复用，模型写出的父节点保留，避免丢失父节点独有内容。见 [全插件审查记录](docs/WHOLE-PLUGIN-AUDIT-20261028.md)。
+
+- 审查 Pi 完整压缩流程，修复重开大上下文时请求捕获与容量保护互相等待、保护中断取消恢复任务、原生压缩提前替换、坏成品反复读取和旧模型等待影响新任务。空间不足时可从已核对的较早历史前缀分支；完整原文与未摘要尾部保留。
+- Pi 流式解码中文与表情，回收不退出的工作进程；把图片计入历史预算，避免巨大旧消息把全部历史拉回，压力下调整保留目标。原生人类新轮次可结束中断工具等待，通知不能解除。104 项 Pi 测试、17 项真实 Pi 离线场景通过；整仓 34 项既有失败与独立基线一致。见 [完整审查记录](docs/PI-CAPACITY-AUDIT-20261028.md)。
+
+- 修复 Pi 将摘要树规划目标误当硬上限的问题：完整结果在实际发送的输出额度内可以超出规划目标，保存前复核沿用同一额度；根摘要仍独立核验替换预算。保留重试的上次失败原因，补充略超目标、完整保存复用及容量拒绝回归。见 [Pi 核验记录](docs/PI-CAPACITY-AUDIT-20261028.md)。
+
+- 修正 Pi 输出预留触发提前替换的问题：接管按总窗口计算 70%/80%，在最终供应商请求上限制输出，模型配置不变；晚启动的后台分支也按剩余容量限制输出。主模型分支单次最多 10 分钟、后台独立无限重试，等待间隔最长 5 分钟；固定原始请求，取消或过期结果不能提交，模型或前缀变化后等待新捕获。见 [Pi 验证记录](docs/PI-CAPACITY-AUDIT-20261028.md)。
+
+- 修正 DSH 压缩比例的分母：按模型总窗口计算，500K 默认在 350K 准备、400K 替换。输出容量单独保护，通过原生请求配置入口限制有效输出上限，并保留和恢复原配置，避免 128K 输出预留把替换线提前到约 300K。
+
+- DSH 主模型分支摘要改为每次最多等待 10 分钟，失败后独立后台重试，总时长和次数不设上限，递增等待最长 5 分钟。容量保护等待有效摘要后再放行，用户停止、配置或来源变化、引擎退出取消旧任务；保留原文，隔离迟到结果。运行状态附带尝试次数、下次重试时间与安全错误分类，归档扫描不再挤掉活动摘要任务。
 
 - 移除 Hermes 接入、自动归档、摘要写入、模型目录与历史导入适配，删除后台卡片、筛选项、图标和当前文档中的支持说明。旧钩子静默停用，旧登记及摘要任务停用；历史归档保留用于原文查回，后台列表与搜索不再展示。
 - 修复 #17：宿主移动对话文件后，逐条核对原始摘要索引、私有归档和新文件的已归档前缀，确认一致才更新路径并继续增量归档。拒绝截短、篡改、类型冲突或归档缺失的记录。

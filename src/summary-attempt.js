@@ -20,13 +20,20 @@ export function abortable(promise, signal, onLate) {
   })
 }
 
-// A route timeout ends this call, not the entire background job. The next
-// explicitly configured route gets its own deadline; parent cancellation wins.
+// A route timeout ends this call, not the entire background job. Callers may
+// report real stream progress to renew the idle deadline; parent cancellation
+// always wins. Calls that do not report progress retain the fixed deadline.
 export async function summaryAttempt(run, parent, timeoutMs) {
   parent?.throwIfAborted()
   const controller = new AbortController()
   const signal = parent ? AbortSignal.any([parent,controller.signal]) : controller.signal
-  const timer = setTimeout(() => controller.abort(Object.assign(new DOMException('Summary request timed out', 'TimeoutError'), {summaryKind:'timeout'})), timeoutMs)
-  try { return await abortable(Promise.resolve().then(() => {signal.throwIfAborted();return run(signal)}), signal) }
+  let timer
+  const progress = () => {
+    if (signal.aborted) return
+    clearTimeout(timer)
+    timer = setTimeout(() => controller.abort(Object.assign(new DOMException('Summary request timed out', 'TimeoutError'), {summaryKind:'timeout'})), timeoutMs)
+  }
+  progress()
+  try { return await abortable(Promise.resolve().then(() => {signal.throwIfAborted();return run(signal,progress)}), signal) }
   finally { clearTimeout(timer) }
 }

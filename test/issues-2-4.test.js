@@ -10,10 +10,10 @@ import { summarizeWithModel, buildHierarchy, summaryWork } from '../src/summariz
 import { fitSummary, profileKey, readSummaryProfile, visibleOutputRoom, isReducedSummary, CAPPED_TAG } from '../src/summary-generation.js'
 import { planCompaction } from '../src/compaction.js'
 import { startWeb } from '../src/web.js'
-const fixture = t => {
+const fixture = (t,{harness='claude-code'}={}) => {
  const dir=mkdtempSync(join(tmpdir(),'superlcm-issues234-')),store=new ClaudeStore(join(dir,'store')),file=join(dir,'source.jsonl')
  writeFileSync(file,[{role:'user',content:'Never deploy without approval.'},{role:'assistant',content:'Unresolved work only.'}].map(JSON.stringify).join('\n')+'\n')
- store.ingest('s',file);store.setMetadata('s',{harness:'claude-code',externalId:'s'})
+ store.ingest('s',file);store.setMetadata('s',{harness,externalId:'s'})
  t.after(()=>store.close());return {dir,store,file}
 }
 const reply=(content,finish='stop',extra={})=>new Response(JSON.stringify({choices:[{message:{content:finish==='stop'?(/^#/.test(content)?content:'# '+content):content},finish_reason:finish}],...extra}))
@@ -132,7 +132,9 @@ test('overshoot profile reduces the next requested length and preserves the fina
 })
 
 test('merged reduced summaries retain degraded status even if the model omits the marker',async t=>{
- const {store,file}=fixture(t)
+ // Claude now rebuilds an untrusted prefix before merging; exercise the
+ // generic navigation-only parent behavior independently on Codex.
+ const {store,file}=fixture(t,{harness:'codex'})
  appendFileSync(file,Array.from({length:6},(_,i)=>JSON.stringify({role:'user',content:'Long source '+i})).join('\n')+'\n');store.ingest('s',file)
  for(let i=0;i<4;i++)store.addNode({session:'s',id:'leaf'+i,level:0,first:i*2,last:i*2+1,children:[],summary:(i===0?CAPPED_TAG:'')+' complete source summary '.repeat(100),digest:'d'+i,model:'fixture'})
  assert.equal(summaryWork(store,'s',{fanout:4,targetTokens:20000}).reducedSources,true)

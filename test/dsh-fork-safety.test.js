@@ -10,7 +10,7 @@ for (const fault of ['malformed-json','missing-node','wrong-order','oversized','
     let release, branches=0
     const barrier=new Promise(resolve=>{release=resolve})
     try {
-      history(h,.94)
+      history(h,.91)
       const original=h.ctx.llm.stream.bind(h.ctx.llm)
       h.ctx.llm.stream=options=>!forkScope.getStore()?original(options):(async function*(){
         branches++
@@ -25,12 +25,15 @@ for (const fault of ['malformed-json','missing-node','wrong-order','oversized','
         yield {type:'finish',reason:fault==='quota'?{kind:'error',failure:{code:'QUOTA',message:'synthetic quota'}}:{kind:'stop'}}
       })()
       const input='Keep current exact authorization: inspection only, never deploy.'
-      await send(h,input)
+      const pending=send(h,input)
+      await until(()=>h.engine.backgroundFolds.get(h.agent)?.status==='retrying')
+      assert.equal(h.main.length,0,'unsafe main request remains paused across summary failure')
+      h.agent.cancel({kind:'user'},{keepInbox:true})
+      await pending
       release(); await h.engine.settleBackgroundFold(h.agent)
       assert.equal(branches,1)
       assert.equal(h.main.length,0,'unsafe main request must not reach the adapter')
       assert.equal(count(h,'compaction/summary'),0,'no failed or late tree may replace context')
-      assert.ok(h.errors.length)
       assert.ok(h.agent.session.snapshotEvents().some(e=>JSON.stringify(e).includes(input)))
     } finally { release(); await close(h) }
   })

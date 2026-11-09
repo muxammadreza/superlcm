@@ -21,6 +21,30 @@ import { PassThrough } from 'node:stream'
 import { runInNewContext } from 'node:vm'
 const fixture=fn=>async t=>{const dir=mkdtempSync(join(tmpdir(),'superlcm-dashboard-')),store=new ClaudeStore(join(dir,'index')),_small=store.db.prepare('INSERT INTO summary_tuning(id,target_chars,batch_size,fanout) VALUES(1,12000,8,4)').run(),env={...process.env,HOME:dir,USERPROFILE:dir,CODEX_HOME:join(dir,'codex'),CLAUDE_CONFIG_DIR:join(dir,'claude')};t.after(()=>{store.close();rmSync(dir,{recursive:true,force:true})});await fn({dir,store,env,t})}
 
+test('web page holds one asset version until restart, with a fresh nonce per response', () => {
+ const moduleUrl=new URL('../src/web-page.js',import.meta.url)
+ const source=readFileSync(moduleUrl,'utf8').replace(/^import .*\n/gm,'').replaceAll('import.meta.url','moduleUrl').replace('export function page','function page')
+ let revision=1
+ const start=()=>{
+  const context={URL,moduleUrl,icons:{},dshRuntimeState:()=>{},dshGlobalState:()=>{},readFileSync:url=>url.pathname.endsWith('.svg')?'<svg></svg>':'/* asset revision '+revision+' */'}
+  runInNewContext(source+'\nthis.page=page',context)
+  return context.page
+ }
+ const running=start()
+ revision=2 // An update lands after startup, before even the first browser request.
+ const first=running('first-nonce'),second=running('second-nonce')
+ for(const html of [first,second]) {
+  assert.match(html,/asset revision 1/)
+  assert.doesNotMatch(html,/asset revision 2/,'updated scripts must not be mixed with the running HTML template')
+ }
+ assert.match(first,/<script nonce="first-nonce">/)
+ assert.match(second,/<script nonce="second-nonce">/)
+ assert.doesNotMatch(second,/first-nonce/)
+ const restarted=start()('restart-nonce')
+ assert.match(restarted,/asset revision 2/)
+ assert.doesNotMatch(restarted,/asset revision 1/)
+})
+
 test('DSH selected coverage UI uses effective counts, exact bands and plugin ownership', () => {
  const code=readFileSync(new URL('../src/web-client.js',import.meta.url),'utf8')
  const node={id:'summary',level:1,first:2,last:5,children:['leaf'],summary:'DSH native summary. Exact selected source records: 2, 4, 5. The range below is a reading envelope, not a claim that every intervening record was summarized.\nUseful navigation summary',source_records:[2,4,5],source_ranges:[{from:2,to:2},{from:4,to:5}]}
@@ -45,6 +69,11 @@ test('DSH selected coverage UI uses effective counts, exact bands and plugin own
  assert.match(context.generateButton('生成摘要…'),/SuperLcm 插件生成/)
  assert.doesNotMatch(context.generateButton('生成摘要…'),/配置自定义 API|没有可用/)
  context.renderList();assert.match(elements.get('#rows').innerHTML,/width:60%/)
+ const overview={...node,id:'rolling-overview',level:22,overview:true}
+ const corrected=context.stripHtml({...d,bands:[overview,node,leaf]})
+ assert.match(corrected,/总览/);assert.doesNotMatch(corrected,/第 23 层/,'rolling overview versions do not create granularity lanes')
+ assert.match(context.nodeHtml(overview),/总览/)
+ assert.match(context.nodeHtml({...overview,overview:false,historical_overview:true}),/旧总览/)
 })
 function transcript(env,h,id,name='Conversation'){const folder=configFiles(h,env).transcripts;mkdirSync(folder,{recursive:true});const path=join(folder,id+'.jsonl');const header=h==='codex'?{type:'session_meta',payload:{id}}:{sessionId:id,type:'custom-title',customTitle:name};writeFileSync(path,[header,...Array.from({length:8},(_,i)=>({role:i%2?'assistant':'user',content:name+' decision '+i,sessionId:id}))].map(x=>JSON.stringify(x)).join('\n')+'\n');return path}
 test('real CLI IDs survive policy and workers, dangerous model strings fail',fixture(({store})=>{for(const model of ['opus[1m]','claude-fable-5-1[1m]','tianyi/glm-5.3-oc','opencode-go/deepseek-v4.1-flash']){assert.equal(validModel(model),true);store.setGlobalSetting('cli',model);assert.equal(store.globalSetting().model,model)}for(const model of ['--flag','$(whoami)','a b','a;cmd','a\nfoo'])assert.equal(validModel(model),false)}))

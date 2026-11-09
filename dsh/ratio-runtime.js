@@ -32,7 +32,7 @@ export async function resolvePolicy(engine, agent, signal) {
   signal?.throwIfAborted()
   if (headerFingerprint !== hash(requestIdentity(agent)) || generation !== engine.runtimeGeneration) throw Error('聊天模型正在切换，请重试当前请求')
   const measurement = engine.ctx.tokenMeter.measure(agent.session)
-  const priced = selectionPricing(measurement, agent.session.requestHeader())
+  const priced = selectionPricing(measurement, agent.session.requestHeader(), agent.session)
   const fixedTokens = priced.nodes.filter(n => agent.session.eventAt(n.seq).type === 'system/message').reduce((sum,n) => sum+n.tokens,0)
     + Math.ceil((identity.tools.length ? JSON.stringify(identity.tools).length / 4 + 4 : 0) * priced.factor)
   const policy = deriveRatioPolicy(engine.rollingConfig, { contextWindow: info.context?.contextWindow,
@@ -64,7 +64,7 @@ export function latestUserIndex(session) {
 }
 export function activeInputTokens(engine,agent) {
   const measurement=engine.ctx.tokenMeter.measure(agent.session)
-  return engine.rollingConfig.budgetMode==='ratio'?selectionPricing(measurement,agent.session.requestHeader()).activeTokens:measurement.totalTokens
+  return engine.rollingConfig.budgetMode==='ratio'?selectionPricing(measurement,agent.session.requestHeader(),agent.session).activeTokens:measurement.totalTokens
 }
 export async function pressureStep(engine, agent, signal) {
   const policy = await resolvePolicy(engine, agent, signal)
@@ -79,17 +79,19 @@ export async function pressureStep(engine, agent, signal) {
   if (policy.budgetMode !== 'ratio' || activeInputTokens(engine,agent) < policy.hardActiveTokens) return
   // Wait for progress, not the whole frozen multi-batch job. At each completed
   // batch a verified prefix may already release safe headroom. One total
-  // deadline covers all batches; later batches do not reset it.
+  // deadline covers legacy batches. Native forks retry independently and keep
+  // this admitted request paused until success or explicit cancellation.
   const deadline = new AbortController()
-  const waiting = AbortSignal.any([signal, deadline.signal])
-  const timer = setTimeout(() => deadline.abort(Error('后台摘要尚未就绪，请稍后重试。当前请求已保留。')), policy.summaryTimeoutMs)
+  const retryingFork=engine.rollingConfig.summaryMode==='main-fork'
+  const waiting = retryingFork ? signal : AbortSignal.any([signal, deadline.signal])
+  const timer = retryingFork ? null : setTimeout(() => deadline.abort(Error('后台摘要尚未就绪，请稍后重试。当前请求已保留。')), policy.summaryTimeoutMs)
   try {
     for (;;) {
       waiting.throwIfAborted()
       engine.tryCommitBackgroundFold(agent, {allowPressure:true})
       if (activeInputTokens(engine,agent) < policy.hardActiveTokens) break
       const pending = engine.backgroundFolds.get(agent)
-      if (!['summarizing','cancelling'].includes(pending?.status) || !pending.promise) break
+      if (!['summarizing','retrying','cancelling'].includes(pending?.status) || !pending.promise) break
       await abortable(pending.promise, waiting)
     }
   } finally { clearTimeout(timer) }

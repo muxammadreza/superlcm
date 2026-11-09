@@ -9,7 +9,7 @@ const store = new ClaudeStore()
 for await (const line of createInterface({ input: process.stdin, crlfDelay: Infinity })) {
   let id
   try {
-    if (line.length > 32e6) throw Error('DSH capture input exceeds 32 MB')
+    if (Buffer.byteLength(line) > 34e6) throw Error('DSH capture input exceeds 34 MB')
     const request = JSON.parse(line); id = request.id
     let result
     if (request.method === 'ping') result = { ready: true }

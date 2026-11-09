@@ -4,12 +4,13 @@ import {sharedControls} from './settings.js'
 // and while running; there is one document for every DSH launch mode.
 import { readFileSync, existsSync } from 'node:fs'
 import {ratioOptions} from './ratio-policy.js'
+import {DSH_SUMMARY_TIMEOUT_MS} from './summary-timeout.js'
 export const controlFields = {
   tailCount:[1,10000,24], minRetainTokens:[0,2000000,32000],
   softActiveTokens:[1000,4000000,160000], hardActiveTokens:[1001,8000000,220000],
   pressureFoldTokens:[1,2000000,20000], foldBatchTokens:[1,4000000,64000],
   summaryPrefixTargetTokens:[0,2000000,0], condensedMinFanout:[2,100,4],
-  summaryTimeoutMs:[1000,1800000,180000], summaryRetryCooldownMs:[1000,1800000,30000],
+  summaryTimeoutMs:[1000,1800000,DSH_SUMMARY_TIMEOUT_MS], summaryRetryCooldownMs:[1000,1800000,30000],
 }
 export function controlsConfig(raw) {
   if(!raw||typeof raw!=='object'||typeof raw.auto!=='boolean')throw Error('压缩开关无效')

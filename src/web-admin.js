@@ -229,6 +229,9 @@ async function loadSettings() {
   renderForkModelPicker('claude-code');renderForkModelPicker('pi')
   if (state.harnesses) renderTools()
   $('#dataDir').value = s.index_home || ''
+  const pendingFiles=$('#archiveCleanupWarning')
+  pendingFiles.hidden=!s.file_cleanup_pending
+  pendingFiles.textContent=s.file_cleanup_pending?t('有 {n} 个已删除对话的档案文件等待清理；重新打开设置时会重试。',{n:fmt(s.file_cleanup_pending)}):''
 }
 const hostOf = url => { try { return new URL(url).host } catch { return url || '' } }
 const isLocal = url => /^https?:\/\/(127\.|localhost|\[::1\])/.test(url || '')
@@ -244,7 +247,8 @@ function renderApiModels() {
     (m.key_configured ? t('密钥已保存') : isLocal(m.url) ? t('本机地址，无需密钥') : t('缺少密钥')) + (m.used_by.length ? ' · ' + t('正在使用：{tools}', { tools: m.used_by.map(toolName).join(LANG === 'zh' ? '、' : ', ') }) : '') + '</span></div>' +
     '<button type="button" class="link" data-am-edit="' + esc(m.id) + '">' + t('修改') + '</button>' +
     '<button type="button" class="link" data-am-del="' + esc(m.id) + '"' + (m.used_by.length ? ' disabled title="' + t('先在「接入」页把使用它的工具换成别的方式') + '"' : '') + '>' + t('删除') + '</button></div>'
-  $('#apiModels').innerHTML = (list.length || edit ? '' : '<p class="muted am-empty">' + t('还没有添加模型。') + '</p>') +
+  const pending=admin.settings.credential_cleanup_pending||[]
+  $('#apiModels').innerHTML = (pending.length?'<p class="muted">'+t('以下已删除模型的密钥仍在等待清理：{scopes}。重新打开设置时会重试。',{scopes:esc(pending.join('、'))})+'</p>':'') + (list.length || edit ? '' : '<p class="muted am-empty">' + t('还没有添加模型。') + '</p>') +
     list.map(m => edit === m.id ? modelForm(m) : row(m)).join('') +
     (edit === 'new' ? modelForm({}) : '<button type="button" class="btn" id="amAdd">' + t('+ 添加模型') + '</button>')
   const root = $('#apiModels')
@@ -253,7 +257,7 @@ function renderApiModels() {
   for (const b of root.querySelectorAll('[data-am-del]')) b.onclick = () => {
     // One more click to confirm, right on the button.
     if (b.dataset.armed !== '1') { b.dataset.armed = '1'; b.textContent = t('确认删除'); return }
-    act(async () => { await api('/api/api-models/delete', { id: b.dataset.amDel }); await loadSettings(); toast(t('已删除')) }, b)
+    act(async () => { const result=await api('/api/api-models/delete', { id: b.dataset.amDel }); await loadSettings(); toast(result.credential_cleanup_pending?t('模型已删除，密钥等待清理'):t('已删除')) }, b)
   }
   const form = root.querySelector('.am-form')
   if (!form) return
@@ -318,7 +322,7 @@ function writerRows(h) {
   const savedMode=x?x.mode:s.global.mode,mode=savedMode==='agent'?'main-fork':savedMode,rows=[]
   const writers=mode==='cli'?[['cli',t('兼容模式：旧版后台写')],...WRITERS]:WRITERS
   rows.push([t('摘要生成'), '<select aria-label="' + t('摘要生成') + '" data-tool="' + esc(h.harness) + '">' + writers.map(([id, label]) => '<option value="' + id + '"' + (mode === id ? ' selected' : '') + '>' + label + '</option>').join('') + '</select>'])
-  if (mode === 'main-fork') rows.push([t('模型'), '<span>'+t('跟随当前对话模型与账号')+'</span>'])
+  if (mode === 'main-fork') rows.push([t('模型'), '<span>'+esc((x?x.model:s.global.model)||t('跟随当前对话模型与账号'))+'</span>'])
   if (mode === 'cli' && h.bin) rows.push([t('模型'), '<select aria-label="' + t('模型') + '" data-model="' + esc(h.harness) + '"><option value="' + esc(x?.model || '') + '">' + esc(x?.model || t('跟随 {tool} 当前模型', { tool: toolName(h.harness) })) + '</option></select>'])
   if (mode === 'cli' && h.harness === 'claude-code' && h.claude?.plugin?.enabled) rows.push(['', '<span class="muted">' + t('Claude Code 2.1.286+ 在对话里直接调用这个模型，不另开会话；对话结束后剩下的交给后台命令行补完') + '</span>'])
   if (mode === 'api') {
@@ -435,7 +439,7 @@ $('#cleanGo').onclick = () => {
     const go = root.querySelector('#bulkGo')
     go.onclick = () => act(async () => {
       const x = await api('/api/delete-bulk', { before_ms: plan.before_ms, harness: plan.harness, expect_count: plan.expect_count })
-      closeOverlay(); toast(t('已删除 {n} 个对话', { n: fmt(x.deleted) }))
+      closeOverlay(); toast(x.file_cleanup_pending?t('对话已删除，部分档案文件等待清理'):t('已删除 {n} 个对话', { n: fmt(x.deleted) }))
       state.sel = null; state.detail = null; $('#detail').innerHTML = ''
       await loadConversations(); await loadStorage()
     }, go)

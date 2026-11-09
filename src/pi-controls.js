@@ -20,10 +20,11 @@ export function savePiCompression(store, input) {
     if (typeof input.enabled !== 'boolean' || !Number.isFinite(input.ratio) || input.ratio < .11 || input.ratio > .99) throw Error('Pi 压缩比例必须在11%到99%之间')
     const apiRef=input.api_ref===undefined?before.api_ref:input.api_ref
     if (apiRef !== null && (typeof apiRef !== 'string' || !store.apiModel(apiRef))) throw Error('请选择已保存的摘要 API 模型')
-    const summaryMode = input.summaryMode ?? (input.api_ref?'api':before.summaryMode) ?? 'main-fork'
+    const previousRoute=['api','main-fork'].includes(before.summaryMode)?before.summaryMode:'main-fork'
+    const summaryMode = input.summaryMode ?? (input.api_ref?'api':previousRoute)
     if (!['api','main-fork'].includes(summaryMode)) throw Error('Pi 摘要方式无效')
     if (summaryMode !== 'main-fork' && !apiRef && !(before.summaryMode==='api'&&!before.api_ref)) throw Error('请先选择 Pi 的摘要 API 模型')
-    const routeChanged=summaryMode!==before.summaryMode||input.api_ref!==undefined&&apiRef!==before.api_ref
+    const routeChanged=summaryMode!==previousRoute||input.api_ref!==undefined&&apiRef!==before.api_ref
     if(input.enabled&&!before.summaryEnabled&&!routeChanged)throw Error('请先在工具卡片开启后台摘要')
     original = existsSync(file) ? readFileSync(file) : null
     if (routeChanged&&summaryMode!=='main-fork'&&apiRef) store.setHarnessSetting('pi', 'api', null, null, null, apiRef)

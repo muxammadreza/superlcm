@@ -20,10 +20,10 @@ export function enqueueSummary(store,session,{backend=null,mode,model,origin='ma
   if(explicit&&mode==='api'&&!api)throw Error('No saved custom API; configure one in Settings first')
   model=mode==='main-fork'?null:api?.model||model||(mode===chosen.mode?chosen.model:null)||env.SUPERLCM_CLAUDE_MODEL||null
   if(mode==='api'&&(!model||(!api&&store.apiCredential(session,env)===null))){store.setStatus(session,'summary_unconfigured');return {added:false,unconfigured:true}}
-  const fork=mode==='main-fork'?planMainFork(store,session,{force:['manual','bulk'].includes(origin),env}):null
+  const fork=mode==='main-fork'?planMainFork(store,session,{force:['manual','bulk'].includes(origin),explain:origin==='manual',env}):null
   const work=mode==='main-fork'?(fork?{batch_id:fork.digest}:null):summaryWork(store,session)
   if(!work)return {added:false,none:true}
-  if(!['manual','bulk'].includes(origin)&&store.summaryRetry(session,work.batch_id,summarySettingsRevision(store,session,env)))return {added:false,cooldown:true}
+  if(mode!=='main-fork'&&!['manual','bulk'].includes(origin)&&store.summaryRetry(session,work.batch_id,summarySettingsRevision(store,session,env)))return {added:false,cooldown:true}
   store.db.exec('BEGIN IMMEDIATE')
   try {
     const active=activeSummaryRun(store,session)

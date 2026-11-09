@@ -26,7 +26,7 @@ export const hash=value=>createHash('sha256').update(JSON.stringify(value)).dige
 export const message=text=>createUserMessage({source:{kind:'user'},content:[{type:'text',text}]})
 const summary='# Historical decisions\nOriginals remain available through exact source references. Preserve current authorization, unresolved questions and recorded evidence. This offline summary tests control flow, not semantic quality.'
 
-export async function lab({capacity=200000,mode='normal',config={},dir,seed,id='matrix-session',fixed=0,priceFactor=1,persistent=false,resume=false}={}) {
+export async function lab({capacity=200000,maxTokens=2048,mode='normal',config={},dir,seed,id='matrix-session',fixed=0,priceFactor=1,persistent=false,resume=false}={}) {
   dir??=mkdtempSync(join(tmpdir(),'superlcm-reliability-'))
   mkdirSync(dir,{recursive:true})
   const ctx=new Context(),h={ctx,dir,id,capacity,model:'main-'+capacity,mode,calls:[],main:[],errors:[],warnings:[],gates:[],toolRuns:[],activeTools:0,maxParallel:0,boundaryChecks:[],originals:new Map(),generation:0}
@@ -87,10 +87,10 @@ export async function lab({capacity=200000,mode='normal',config={},dir,seed,id='
     ctx.tools.register(defineTool({name:'lab_payload',description:'Return a deterministic test-only text payload.',parameters:{characters:{type:'integer',required:true},number:{type:'integer',required:true}},output:{schema:{type:'string'},render:(_,value)=>[{type:'text',text:value}]},isConcurrencySafe:()=>true,async execute(args){h.toolRuns.push(args);h.activeTools++;h.maxParallel=Math.max(h.maxParallel,h.activeTools);await sleep(args.number?2:4);h.activeTools--;return 'TOOL_RESULT_'+args.number+' '+'t'.repeat(args.characters)}}))
     h.engine=new Engine(ctx,{auto:true,budgetMode:'ratio',archiveHome:dir,foldBatchTokens:20000,summaryTimeoutMs:1500,summaryRetryCooldownMs:10,summarizationProvider:'lab-primary',summarizationModel:'summary',fallbackSummarizationProvider:'lab-backup',fallbackSummarizationModel:'backup',...config})
     await tick()
-    if(resume){h.handle=await ctx.agents.resume({resumeSessionId:id,agentOptions:{provider:'lab-main',model:h.model,maxTokens:2048}});h.agent=h.handle.agent}
-    else if(persistent){h.handle=await ctx.agents.create({sessionId:id,agentOptions:{provider:'lab-main',model:h.model,maxTokens:2048},meta:{cwd:dir}});h.agent=h.handle.agent}
-    else if(seed){const handle=await ctx.agents.create({sessionId:id,seed:seed.events,meta:seed.header,agentOptions:{provider:'lab-main',model:'main-'+capacity,maxTokens:2048}});h.agent=handle.agent}
-    else h.agent=await ctx.agentLoop.create(id,{provider:'lab-main',model:'main-'+capacity,maxTokens:2048},{cwd:dir})
+    if(resume){h.handle=await ctx.agents.resume({resumeSessionId:id,agentOptions:{provider:'lab-main',model:h.model,maxTokens}});h.agent=h.handle.agent}
+    else if(persistent){h.handle=await ctx.agents.create({sessionId:id,agentOptions:{provider:'lab-main',model:h.model,maxTokens},meta:{cwd:dir}});h.agent=h.handle.agent}
+    else if(seed){const handle=await ctx.agents.create({sessionId:id,seed:seed.events,meta:seed.header,agentOptions:{provider:'lab-main',model:'main-'+capacity,maxTokens}});h.agent=handle.agent}
+    else h.agent=await ctx.agentLoop.create(id,{provider:'lab-main',model:'main-'+capacity,maxTokens},{cwd:dir})
     h.agent.ctx.on('agent/request',async(_payload,next)=>({...await next(),model:h.model}))
     h.journal=join(dir,'session-events-'+randomUUID()+'.jsonl')
     writeFileSync(h.journal,JSON.stringify({header:h.agent.session.header})+'\n'+h.agent.session.snapshotEvents().map(e=>JSON.stringify(e)+'\n').join(''))
@@ -136,7 +136,7 @@ export function remember(h){
   for(const event of h.agent.session.snapshotEvents())h.originals.set(event.seq,hash(event))
 }
 export function history(h,ratio=.92,{pieces=12}={}){
-  const characters=Math.floor((h.capacity-2048)*4*ratio/pieces)
+  const characters=Math.floor(h.capacity*4*ratio/pieces)
   for(let i=0;i<pieces;i++)h.agent.session.append('user/message',message('Historical decision '+i+' '+'x'.repeat(characters)),{surfaceOp:'append'})
   remember(h)
 }

@@ -1,5 +1,5 @@
-// Upgrade persisted host/CLI defaults once. Explicit legacy CLI requests made
-// after the upgrade remain available to old integrations; they are not a UI mode.
+// Retire the old in-conversation writer while preserving persisted CLI choices
+// and models. Old databases do not distinguish explicit CLI settings from defaults.
 export function migrateSummaryModes(db) {
   const tables=['summary_policies','summary_preferences','global_summary_settings','harness_summary_settings']
   const applied=()=>!!db.prepare("SELECT 1 FROM sqlite_master WHERE name='summary_mode_migrations'").get()
@@ -11,7 +11,9 @@ export function migrateSummaryModes(db) {
   const own=!db.isTransaction
   db.exec(own?'BEGIN IMMEDIATE':'SAVEPOINT summary_modes')
   try {
-    const legacy=applied()?"mode='agent'":"mode IN ('agent','cli','codex-cli')"
+    // Persisted CLI choices cannot be distinguished from old defaults. Preserve
+    // them and their model; only the retired in-conversation mode is migrated.
+    const legacy="mode='agent'"
     for(const name of tables){
       const sql=db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(name)?.sql
       if(!sql)continue

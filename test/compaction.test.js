@@ -238,11 +238,14 @@ test('Claude Code writes its own summaries through summary-claim / summary-save,
   const s = new ClaudeStore(home)
   assert.equal(s.hostWriter('s3'), true)
   assert.deepEqual(s.nodeRows('s3', 0).map(n => [n.first, n.last, n.model]), [[0, 1, 'claude-code-host:haiku']])
+  // Prevent the detached background worker from racing the synthetic worker
+  // lease below; a separate test covers scheduling after handoff.
+  s.setHarnessSetting('claude-code','off')
   s.close()
   assert.deepEqual(run('summary-handoff'), {}) // the end of the session: the separate worker takes over
   const t = new ClaudeStore(home); assert.equal(t.hostWriter('s3'), false)
   // A separate worker's lease is its own: a refused save or a handoff from the conversation leaves it alone.
-  assert.equal(t.lease('s3', 300000, 'worker:1'), true); t.close()
+  assert.equal(t.lease('s3', 300000, 'worker:1'), true); t.setHarnessSetting('claude-code','cli','haiku'); t.close()
   run('summary-host')
   assert.deepEqual(run('summary-save', JSON.stringify({ batch_id: 'nope', summary: 'x'.repeat(30) })), { error: 'no summary claimed in this conversation' })
   run('summary-handoff')
@@ -299,27 +302,12 @@ test('a repeated run of messages does not move the cut past an uncovered one', (
   assert.ok(plan.start <= 4)
 })
 
-test('an unfinished first turn that is not summarized is never dropped', () => {
-  const messages = [msg('assistant', 'tool working', { toolUses: [{ id: 't' }] }), msg('user', '', { toolResults: 1 }), msg('user', 'new question'), msg('assistant', 'new answer'), msg('user', 'last question'), msg('assistant', 'last answer')]
-  const events = [ev(0, 'user: old'), ev(1, 'assistant: old done'), ev(2, 'assistant: tool working'), ev(3, ''), ev(4, 'user: new question'), ev(5, 'assistant: new answer'), ev(6, 'user: last question'), ev(7, 'assistant: last answer')]
-  const plan = planCompaction({ meta, events, nodes: [node('a', 0, 0, 1)], messages, tokens: 6000, keepTokens: 0 })
-  // Its dialogue is short, so it goes into the packet word for word instead of being dropped.
-  assert.equal(plan.use, true)
-  assert.match(plan.packet, /<recent records="2-7">[\s\S]*\[record 2\] assistant: tool working/)
-  assert.equal(plan.through, 7)
-})
-
-test('a stretch of tool calls with little dialogue is carried word for word, not handed back', () => {
-  // Summaries stop at record 1; records 2-9 are mostly tool output (big sizes) with short dialogue.
-  const events = [ev(0, 'user: old'), ev(1, 'assistant: old done'), ev(2, 'user: build it'), ev(3, ''), ev(4, ''), ev(5, 'assistant: built'), ev(6, 'user: test it'), ev(7, 'assistant: passed'), ev(8, 'user: ship'), ev(9, 'assistant: shipped')]
-  const messages = [msg('user', 'build it'), msg('assistant', '', { size: 90000 }), msg('user', '', { toolResults: 1, size: 90000 }), msg('assistant', 'built'),
-    msg('user', 'test it'), msg('assistant', 'passed'), msg('user', 'ship'), msg('assistant', 'shipped')]
-  const plan = planCompaction({ meta, events, nodes: [node('a', 0, 0, 1)], messages, tokens: 200000, window: 300000 })
-  assert.equal(plan.use, true)
-  assert.equal(plan.start, 4) // the 180k-token first turn is not pulled back in to reach the keep target
-  assert.match(plan.packet, /\[record 2\] user: build it[\s\S]*\[record 9\] assistant: shipped/)
-  // Context that is not this record is never replaced.
-  assert.equal(planCompaction({ meta, events, nodes: [node('a', 0, 0, 1)], messages: [...messages, msg('user', 'not recorded')], tokens: 200000, window: 300000 }).use, false)
+test('unverified preview-only history cannot authorize an inline replacement', () => {
+  const messages = [msg('user','build it'),msg('assistant','',{toolUses:[{id:'t'}],size:90000}),msg('user','',{toolResults:1,size:90000}),msg('user','next request')]
+  const events = [ev(0,'user: old'),ev(1,'assistant: old done'),ev(2,'user: build it'),ev(3,''),ev(4,''),ev(5,'user: next request')]
+  const result = planCompaction({meta,events,nodes:[node('a',0,0,1)],messages,tokens:200000,window:300000})
+  assert.equal(result.use,false)
+  assert.ok(messages[1].toolUses.length&&messages[2].toolResults)
 })
 
 test('the takeover stays off when Claude’s settings cannot be written', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, () => {

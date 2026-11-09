@@ -3,7 +3,7 @@ import {join} from 'node:path'
 import {homedir} from 'node:os'
 import {claudeTranscript} from './store.js'
 import {buildHierarchy,summarySettingsRevision,summaryEstimate,summaryWork} from './summarize.js'
-import {summarizeWith,writerTool,WRITER_CLI} from './cli-writers.js'
+import {summarizeWith,writerTool,hostWriterTool,WRITER_CLI} from './cli-writers.js'
 import {scheduleSummary,mainForkDue} from './summary-scheduler.js'
 import {RECENT_CHARS} from './compaction.js'
 import {claudeCompactAt} from './takeover.js'
@@ -119,7 +119,7 @@ export function summaryTick(store,id,{env=process.env,spawnProcess,tokens=0,wind
  const source=store.source(id),file=source?.path||firstTranscript(id,env)
  if(!file||!existsSync(file))return {none:'not recorded yet'}
  if(source&&store.metadata(id).harness!=='claude-code')return {none:'different source harness'}
- store.ingest(id,file)
+ if(store.ingest(id,file,'jsonl',{automatic:true}).skipped)return {none:'deleted'}
  if(!source)store.setMetadata(id,{harness:'claude-code',externalId:id})
  const setting=store.effectiveSetting(id,env),{mode,model}=setting
  if(['off','cli','api','main-fork'].includes(mode))store.setSummaryMode(id,mode)
@@ -131,7 +131,7 @@ export function summaryTick(store,id,{env=process.env,spawnProcess,tokens=0,wind
  if(mode==='main-fork')return {scheduled:scheduleSummary(store,id,mode,null,{env,tokens,window,...(spawnProcess?{spawnProcess}:{})})}
  const work=summaryWork(store,id),revision=summarySettingsRevision(store,id,env)
  if(!work||store.summaryRetry(id,work.batch_id,revision))return {none:'no eligible work'}
- if(mode==='cli'&&writerTool('claude-code',env)==='claude-code'){store.setHostWriter(id,true);return {host:true}}
+ if(mode==='cli'&&hostWriterTool('claude-code',env)==='claude-code'){store.setHostWriter(id,true);return {host:true}}
  return {scheduled:scheduleSummary(store,id,mode,model,{env,...(spawnProcess?{spawnProcess}:{})})}
 }
 export const catchupDeadlineMs = (env=process.env) => {

@@ -30,6 +30,7 @@ export async function captureLegacyDshSource(store,source,{clientKind='hook'}={}
  store.db.exec('CREATE TABLE IF NOT EXISTS dsh_legacy_sources(session TEXT PRIMARY KEY,version INTEGER NOT NULL,sha256 TEXT NOT NULL,bytes BLOB NOT NULL,sequence_mode TEXT NOT NULL,records INTEGER NOT NULL,complete INTEGER NOT NULL)')
  store.db.exec('BEGIN IMMEDIATE')
  try{
+  if(clientKind!=='import'&&store.isDeleted(session)){store.db.exec('COMMIT');return {session,skipped:'deleted'}}
   const hasMirrors=!!store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='dsh_mirrors'").get()
   const saved=hasMirrors?store.db.prepare('SELECT header,next_seq FROM dsh_mirrors WHERE session=?').get(session):null
   if(saved)mergeDshHeader(JSON.parse(saved.header),raw.header)

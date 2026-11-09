@@ -31,7 +31,7 @@ export function apply(ctx,config={}) {
   if (migrated.added) ctx.logger?.info?.(`SuperLcm 已迁入 ${migrated.added} 条旧 DSH 摘要`)
   for (const conflict of migrated.conflicts) ctx.logger?.warn?.(`SuperLcm 旧摘要迁入冲突：${conflict.sessionId}/${conflict.nodeId}（${conflict.fields.join(', ')}）；共享索引与旧档案均保留，未覆盖`)
   const warn = error => ctx.logger?.warn?.('SuperLcm 归档：' + (error?.message || error))
-  const forks=new MainArchiveFork(ctx,native,archiveHome,warn)
+  const forks=new MainArchiveFork(ctx,native,archiveHome,warn,{report:(id,phase,selection)=>reporter.report(id,phase,selection)})
   const dirty = new Set(), cursors = new Map(), observed = new Set(), settled=new Set()
   let stopped = false, running = null
   reporter.report('', 'starting')
@@ -101,7 +101,7 @@ export function apply(ctx,config={}) {
       }
       for (let index = incremental ? 0 : from; index < events.length; index++) {
         const record = projectEvent(id, events[index]), size = Buffer.byteLength(JSON.stringify(record))
-        if (size > 4 * 1024 * 1024) throw Error('DSH event exceeds the archive record limit at seq ' + events[index].seq)
+        if (size + 1 > 32 * 1024 * 1024) throw Error('DSH event exceeds the archive record limit at seq ' + events[index].seq)
         if (batch.length >= 500 || bytes + size > 24e6)if(!await flush())return
         batch.push(record); bytes += size
       }

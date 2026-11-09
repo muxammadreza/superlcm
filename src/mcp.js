@@ -13,7 +13,7 @@ const bool = description => ({type:'boolean',description})
 const conversation = str('Conversation #code (e.g. #3fa9c), ID or name')
 export const tools = [
   {name:'lcm_continue',description:'Continue another conversation here: returns its layered outline, the most recent original messages and how to check details. Works across Claude Code, Codex and any other connected tool.',inputSchema:schema({conversation,max_chars:int('Packet budget 2000–30000 characters; default 12000')},['conversation'])},
-  {name:'lcm_find',description:'Without a query, list recent conversations with #codes. With a query, find conversations by name/code and search summaries and original text (substring match, works for Chinese). Optionally scope to one conversation or tool.',inputSchema:schema({query:str('Text to search for; omit to list conversations'),conversation:str('Optional: search only this conversation'),harness:str('Optional tool filter, e.g. claude-code or codex'),limit:int('Results per section, 1–50; default 20')})},
+  {name:'lcm_find',description:'Without a query, list recent conversations with #codes. With a query, find conversations by name/code and search summaries and original text (substring match, works for Chinese). Optionally scope to one conversation or tool.',inputSchema:schema({query:str('Text to search for; omit to list conversations'),conversation:str('Optional: search only this conversation'),harness:str('Optional tool filter, e.g. claude-code or codex'),limit:int('Results per section, 1–50; default 20'),cursor:int('Original search pagination: pass next_cursor when search_complete is false')})},
   {name:'lcm_outline',description:'Browse the summary outline. Without node: top-level summaries covering the whole conversation plus any unsummarized range. With node: that summary\'s children, or its original message list at the lowest level.',inputSchema:schema({conversation,node:str('Optional node ID from a previous outline')},['conversation'])},
   {name:'lcm_read',description:'Read exact original records by number, verified against the source file. Use this to confirm any detail before relying on it. Page with next.',inputSchema:schema({conversation,from:int('First record number'),to:int('Last record number; default from'),char_offset:int('Character offset within the first record'),max_chars:int('Page budget, max 50000; default 12000')},['conversation','from'])},
 ]
@@ -33,7 +33,7 @@ export async function call(store,name,args = {}) {
   if (args.harness!==undefined && (typeof args.harness!=='string' || !/^[a-z][a-z0-9-]{0,39}$/.test(args.harness))) throw new Error('Invalid harness filter')
   if (name==='lcm_find') {
     const session=args.conversation?store.resolveOne(args.conversation):undefined
-    return store.find(args.query,{session,harness:args.harness,limit:args.limit})
+    return store.find(args.query,{session,harness:args.harness,limit:args.limit,cursor:args.cursor})
   }
   const session=store.resolveOne(args.conversation)
   if (name==='lcm_continue') return continuePacket(store,session,{maxChars:args.max_chars??12000})

@@ -111,7 +111,7 @@ test('a real archived synthetic packet is recognized on the second compaction wi
  appendFileSync(file,[{type:'system',subtype:'compact_boundary'},{type:'user',message:{content:first.packet}},...fixture.raw.slice(first.start)].map(JSON.stringify).join('\n')+'\n');store.ingest('s',file)
  const live=[{role:'user',text:first.packet.slice(0,2000),size:first.packet.length},...fixture.messages.slice(first.start)]
  const verified=verifiedCompactionInput(store,'s',live);assert.equal(verified.messages[0].packetSummary,true)
- const second=plan(live);assert.equal(second.use,true);assert.ok(second.packet.includes(request))
+ const second=plan(live);assert.equal(second.use,false,'uncovered duplicate history cannot be replaced by clipped previews');assert.ok(live[0].text.includes('<superlcm-context'))
 })
 test('dense Chinese original requests count against the same language-aware hard window budget',()=>{
  const fixture=longTurn(),dense='只检查合成项目，未经批准不得部署。'+'约束'.repeat(35000)+'完整请求结尾。'

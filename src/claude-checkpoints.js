@@ -5,18 +5,20 @@ export function rescueSourceHash(store,session,last) {
 }
 // Rescue roots have both an exact raw range and the existing summary children.
 // Their verified coverage is separate from ordinary leaf/merge depth.
-export function claudeCheckpoints(store,session) {
+export function claudeCheckpoints(store,session,cache=new Map()) {
   if(!store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='claude_compaction_rescues'").get())return []
   const rows=store.db.prepare("SELECT n.*,r.preparation FROM claude_compaction_rescues r JOIN nodes n ON n.session=r.session AND n.id=r.node_id WHERE r.session=? AND r.state='saved'").all(session)
   return rows.flatMap(n=>{
-    const p=JSON.parse(n.preparation)
-    if(rescueSourceHash(store,session,n.last)!==p.sourceHash)return []
-    return [{...n,checkpoint:true,rescueRequest:p.request||null}]
+    let p;try{p=JSON.parse(n.preparation)}catch{return []}
+    if(!p||rescueSourceHash(store,session,n.last)!==p.sourceHash)return []
+    return [{...n,checkpoint:true,rescueRequest:p.request||null,sourceIncomplete:store.nodeSourceIncomplete(session,n,new Set(),cache)}]
   })
 }
 export function claudeCompactionNodes(store,session) {
-  const roots=claudeCheckpoints(store,session),ids=new Set(roots.map(n=>n.id))
-  return [...store.db.prepare('SELECT * FROM nodes WHERE session=?').all(session).filter(n=>!n.id.startsWith('claude-rescue-')||ids.has(n.id)).map(n=>roots.find(r=>r.id===n.id)||n)]
+  const cache=new Map(),roots=claudeCheckpoints(store,session,cache),ids=new Set(roots.map(n=>n.id)),byId=new Map(roots.map(n=>[n.id,n]))
+  return store.db.prepare('SELECT * FROM nodes WHERE session=?').all(session)
+    .filter(n=>!n.id.startsWith('claude-rescue-')||ids.has(n.id))
+    .map(n=>({...byId.get(n.id)||n,sourceIncomplete:store.nodeSourceIncomplete(session,n,new Set(),cache)}))
 }
 
 // A checkpoint can summarize old summary children and a directly read raw suffix.

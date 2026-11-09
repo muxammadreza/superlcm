@@ -1,15 +1,25 @@
-// Verification only: resolve optional DSH peers from an existing host install.
-// Production profiles already resolve these packages through their node_modules.
+// Verification resolves the host that the installed DSH command actually runs.
+// SUPERLCM_DSH_RUNTIME can explicitly select a different installed host.
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve as resolvePath } from 'node:path'
+import { realpathSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
-const runtime = process.env.SUPERLCM_DSH_RUNTIME || join(homedir(), '.npm-global/lib/node_modules/@deepseek-ai/dsh/package.json')
-const host = createRequire(runtime)
+import { findCli } from '../src/runtime.js'
+
+export function runtimeAnchor(env = process.env) {
+  if (env.SUPERLCM_DSH_RUNTIME) return resolvePath(env.SUPERLCM_DSH_RUNTIME)
+  const cli = findCli('dsh', env)
+  if (cli) return /\.(cmd|bat)$/i.test(cli)
+    ? join(resolvePath(cli, '..'), 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+    : realpathSync(cli)
+  return join(env.HOME || homedir(), '.npm-global/lib/node_modules/@deepseek-ai/dsh/package.json')
+}
+const host = createRequire(runtimeAnchor())
 export async function resolve(specifier, context, nextResolve) {
-  try { return await nextResolve(specifier, context) }
-  catch (error) {
-    if (!specifier.startsWith('@deepseek-ai/')) throw error
-    return { url: pathToFileURL(host.resolve(specifier)).href, shortCircuit: true }
+  if (specifier.startsWith('@deepseek-ai/')) {
+    try { return { url: pathToFileURL(host.resolve(specifier)).href, shortCircuit: true } }
+    catch (error) { if (process.env.SUPERLCM_DSH_RUNTIME) throw error }
   }
+  return nextResolve(specifier, context)
 }

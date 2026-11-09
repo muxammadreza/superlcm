@@ -124,7 +124,7 @@ function renderList() {
   for (const b of $('#rows').querySelectorAll('[data-del]')) b.onclick = () => { const c = state.rows.find(x => x.session === b.dataset.del); if (c) openDelete(c) }
   const go = $('#goConnect'); if (go) go.onclick = () => show('connect')
 }
-$('#more').onclick = () => act(() => loadConversations(false), $('#more'))
+$('#more').onclick = () => act(() => state.query ? runSearch(true) : loadConversations(false), $('#more'))
 const TRASH = '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5M6.8 7v4M9.2 7v4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>'
 function delButton(c) { return '<button type="button" class="row-del" data-del="' + esc(c.session) + '" title="' + t('删除对话') + '" aria-label="' + t('删除对话') + '">' + TRASH + '</button>' }
 function openBulkSummary() {
@@ -147,8 +147,8 @@ function openDelete(c) {
     '<div class="actions"><button type="button" class="btn danger" id="delGo">' + t('删除') + '</button><button type="button" class="btn" data-close>' + t('取消') + '</button></div></div></div></div>', root => {
     const go = root.querySelector('#delGo')
     go.onclick = () => act(async () => {
-      await api('/api/delete', { session: c.session })
-      closeOverlay(); toast(t('已删除'))
+      const result=await api('/api/delete', { session: c.session })
+      closeOverlay(); toast(result.file_cleanup_pending?t('对话已删除，部分档案文件等待清理'):t('已删除'))
       if (state.sel === c.session) { state.sel = null; state.detail = null; $('#detail').innerHTML = ''; $('#conv').classList.remove('show-detail') }
       await loadConversations()
     }, go)
@@ -158,22 +158,30 @@ function openDelete(c) {
 /* ---------- search ---------- */
 let searchTimer
 $('#q').oninput = event => { state.query = event.target.value.trim(); clearTimeout(searchTimer); searchTimer = setTimeout(() => act(runSearch), 250) }
-async function runSearch() {
+async function runSearch(append = false) {
   if (!state.query) { renderList(); return }
-  const query = state.query, data = await api('/api/search?q=' + q(query) + (state.h ? '&harness=' + q(state.h) : ''))
-  if (query !== state.query) return
+  const query = state.query, harness=state.h, seq=state.searchSeq=(state.searchSeq||0)+1
+  const cursor=append?state.searchCursor:null
+  if(append&&!cursor)return
+  const data = await api('/api/search?q=' + q(query) + (harness ? '&harness=' + q(harness) : '') + (cursor ? '&cursor='+q(cursor) : ''))
+  if (query !== state.query || harness!==state.h || seq!==state.searchSeq) return
+  state.searchCursor=data.next_cursor??null
+  state.searchData=append?{...data,conversations:state.searchData.conversations,summaries:state.searchData.summaries,events:[...state.searchData.events,...data.events],search_errors:[...(state.searchData.search_errors||[]),...(data.search_errors||[])]}:data
+  const result=state.searchData
   const pattern = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
   const hl = text => esc(text).replace(pattern, m => '<mark>' + m + '</mark>')
   const hits = [
-    ...data.summaries.map(s => ({ c: s.conversation, where: t('摘要 · 第 {n} 层', { n: s.level + 1 }) + ' · #' + s.first + '–' + s.last, text: s.summary.slice(0, 300), node: s })),
-    ...data.events.map(e => ({ c: e.conversation, where: t('原文') + ' · #' + e.ordinal, text: e.snippet.replace(/^(user|assistant):\s*/, ''), ordinal: e.ordinal }))
+    ...result.summaries.map(s => ({ c: s.conversation, where: t('摘要 · 第 {n} 层', { n: s.level + 1 }) + ' · #' + s.first + '–' + s.last, text: s.summary.slice(0, 300), node: s })),
+    ...result.events.map(e => ({ c: e.conversation, where: t('原文') + ' · #' + e.ordinal, text: e.snippet.replace(/^(user|assistant):\s*/, ''), ordinal: e.ordinal }))
   ]
   $('#rows').innerHTML =
-    (data.conversations.length ? '<div class="group-label">' + t('对话') + '</div>' + data.conversations.map(c => '<button type="button" class="row" data-id="' + esc(c.session) + '">' + mark(c.harness) + '<span class="name">' + hl(c.name) + '</span><span class="meta">#' + esc(c.code) + '</span></button>').join('') : '') +
+    (result.conversations.length ? '<div class="group-label">' + t('对话') + '</div>' + result.conversations.map(c => '<button type="button" class="row" data-id="' + esc(c.session) + '">' + mark(c.harness) + '<span class="name">' + hl(c.name) + '</span><span class="meta">#' + esc(c.code) + '</span></button>').join('') : '') +
     (hits.length ? '<div class="group-label">' + t('内容 · {n} 处', { n: hits.length }) + '</div>' + hits.map((h, i) => '<button type="button" class="hit" data-i="' + i + '"><span class="where">' + esc(h.where) + ' · ' + esc(h.c.name) + '</span><span class="snip">' + hl(h.text) + '</span></button>').join('') : '') +
-    (!data.conversations.length && !hits.length ? '<div class="empty">' + t('未找到「{q}」', { q: esc(query) }) + '</div>' : '')
+    (state.searchCursor ? '<div class="group-label">'+t('原文搜索尚未完成，请继续加载。')+'</div>' : '') +
+    (result.search_errors?.length ? '<div class="group-label">'+t('部分原文暂时无法读取。')+'</div>' : '') +
+    (!result.conversations.length && !hits.length && data.search_complete!==false ? '<div class="empty">' + t('未找到「{q}」', { q: esc(query) }) + '</div>' : '')
   $('#listCount').textContent = t('搜索结果')
-  $('#more').hidden = true
+  $('#more').hidden = !state.searchCursor
   for (const b of $('#rows').querySelectorAll('.row')) b.onclick = () => select(b.dataset.id)
   for (const b of $('#rows').querySelectorAll('.hit')) b.onclick = () => act(async () => {
     const hit = hits[Number(b.dataset.i)]
@@ -211,10 +219,11 @@ const pct = (x, total) => (x / total * 100).toFixed(3) + '%'
 function stripHtml(d) {
   const selected = d.coverage === 'selected-records'
   const total = Math.max(d.records, 1), tail = selected ? d.latest_tail?.records || 0 : d.records - d.summarized_to
-  const maxLevel = d.bands.reduce((m, b) => Math.max(m, b.level), 0)
-  let lanes = ''
+  const blocks=d.bands.filter(b=>!b.overview),overviews=d.bands.filter(b=>b.overview)
+  const maxLevel = blocks.reduce((m, b) => Math.max(m, b.level), 0)
+  let lanes = overviews.length?'<span class="lane-label">'+t('总览')+'</span><div class="lane">'+overviews.map(b=>'<button type="button" class="seg lx" data-node="'+esc(b.id)+'" title="'+t('总览')+'" style="background:var(--l3);left:'+pct(b.first,total)+';width:'+pct(b.last-b.first+1,total)+'"></button>').join('')+'</div>':''
   for (let level = maxLevel; level >= (selected ? 0 : 1); level--) {
-    lanes += '<span class="lane-label">' + t('第 {n} 层', { n: level + 1 }) + '</span><div class="lane">' + d.bands.filter(b => b.level === level).map(b =>
+    lanes += '<span class="lane-label">' + t('第 {n} 层', { n: level + 1 }) + '</span><div class="lane">' + blocks.filter(b => b.level === level).map(b =>
       '<button type="button" class="seg ' + (level > 3 ? 'lx' : 'l' + level) + '" data-node="' + esc(b.id) + '" title="' + t('第 {n} 层', { n: level + 1 }) + ' · ' + (selected ? t('阅读范围 #{a}–#{b}；精确选中 {n} 条记录', { a: b.first, b: b.last, n: b.source_records?.length ?? 0 }) : '#' + b.first + '–' + b.last) + '" style="' + (selected ? 'background:var(--l' + Math.min(level, 3) + ');left:' + pct(b.first, total) + ';width:' + pct(b.last - b.first + 1, total) : 'left:calc(' + pct(b.first, total) + ' + 1px);width:calc(' + pct(b.last - b.first + 1, total) + ' - 2px)') + '"></button>').join('') + '</div>'
   }
   if (d.summary_count && !selected) lanes += '<span class="lane-label">' + t('第 {n} 层', { n: 1 }) + '</span><div class="lane l0" style="--p:' + pct(d.summarized_to, total) + '"></div>'
@@ -297,7 +306,7 @@ function nodeHtml(n) {
     ? '<div class="children">' + (kids ? kids.map(nodeHtml).join('') + (n.directSources || []).map(r => '<div class="raw-link"><button type="button" class="btn small" data-raw="' + r.first + '-' + r.last + '">' + t('查看 {n} 条原文', { n: r.last - r.first + 1 }) + ' (#' + r.first + '–#' + r.last + ')</button></div>').join('') : '<div class="tail-row">' + t('读取中…') + '</div>') + '</div>'
     : '<div class="raw-link"><button type="button" class="btn small" data-raw="' + n.first + '-' + n.last + '">' + t('查看 {n} 条原文', { n: n.source_records?.length ?? n.last - n.first + 1 }) + '</button></div>'
   return '<div class="node" data-id="' + esc(n.id) + '" aria-expanded="' + open + '"><button type="button" class="node-h" data-toggle="' + esc(n.id) + '"><span class="caret"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L7 5 3 8.5" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></span>' +
-    '<span class="lv l' + Math.min(n.level, 3) + '">' + t('第{n}层', { n: n.level + 1 }) + '</span><span class="node-text">' + esc(summary) + '</span><span class="range">#' + n.first + '–' + n.last + '</span></button>' + inner + '</div>'
+    '<span class="lv l' + Math.min(n.level, 3) + '">' + (n.overview?t('总览'):n.historical_overview?t('旧总览'):n.legacy_snapshot?t('旧摘要块'):n.historical?t('历史摘要'):t('第{n}层', { n: n.level + 1 })) + '</span><span class="node-text">' + esc(summary) + '</span><span class="range">#' + n.first + '–' + n.last + '</span></button>' + inner + '</div>'
 }
 async function ensureChildren(id) {
   if (state.children.has(id)) return

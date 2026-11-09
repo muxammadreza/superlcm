@@ -1,7 +1,14 @@
 import { readFileSync } from 'node:fs'
 import { icons } from './web-icons.js'
 import { dshRuntimeState,dshGlobalState } from './dsh-live-state.js'
-const asset = name => readFileSync(new URL(name, import.meta.url), 'utf8')
+// Keep scripts and styles from the same startup as this cached HTML template.
+// Reading them on each request mixes new DOM bindings with old markup after an update.
+const assets = new Map([
+  '../dsh/ui/icon.svg', 'web-style.css', 'web-i18n.js', 'web-client.js',
+  'web-retention-controls.js', 'web-compression.js', 'web-admin.js',
+  'web-dsh-controls.js', 'web-pi-controls.js', 'web-dsh.js'
+].map(name => [name, readFileSync(new URL(name, import.meta.url), 'utf8')]))
+const asset = name => assets.get(name)
 const logo = asset('../dsh/ui/icon.svg').trim().replace('<svg ', '<svg width="20" height="20" aria-hidden="true" ').replace('#B5532F', 'var(--l3)').replace('#CF7A56', 'var(--l2)').replace('#E6AE93', 'var(--l1)')
 const swatches = [['orange', '陶橙', '#C96442'], ['teal', '松石', '#1E6B57'], ['indigo', '靛青', '#3A4FB0'], ['graphite', '石墨', '#2E2E2C']]
 
@@ -110,6 +117,7 @@ export function page(nonce) {
         <h2>存储</h2>
         <p class="desc">所有对话、原文存档和摘要都只存在这台电脑上的这个目录里。</p>
         <div class="fields"><label class="field">数据位置<input id="dataDir" readonly></label></div>
+        <p class="muted" id="archiveCleanupWarning" hidden></p>
         <div class="stat-row" id="storeStats"></div>
         <h3>清理旧对话</h3>
         <p class="desc">按最后更新时间批量删除。只删除 SuperLcm 里的原文存档和摘要，各工具里的原始对话不受影响。</p>

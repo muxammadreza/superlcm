@@ -398,7 +398,9 @@ test('console document hot-applies model, switch and retention and cancels old p
   })
 })
 
-test('native summary adapters reuse credentials without duplicating settings or sign-in flows',async()=>{
+test('native summary adapters reuse credentials without duplicating settings or sign-in flows',async t=>{
+  const requests=[]
+  t.mock.method(globalThis,'fetch',async url=>{requests.push(String(url));return new Response('synthetic offline response',{status:401})})
   const ctx=new Context()
   try {
     const credentials={async resolve(){return {value:'fixture-key'}}};ctx.reflect.provide('credentials',credentials)
@@ -414,6 +416,8 @@ test('native summary adapters reuse credentials without duplicating settings or 
     const signedIn=summaryContext(ctx,{plugin:'@deepseek-ai/dsh-llm-deepseek-account',config:{}});await signedIn.ready
     assert.equal(await signedIn.ctx.get('deepseekAccount').resolveToken(),'fixture-token')
     assert.ok((await signedIn.ctx.llm.listModels('deepseek-account')).length>0)
+    assert.ok(requests.length>0)
+    assert.ok(requests.every(url=>url.startsWith('https://api.deepseek.com/')))
   } finally {await ctx.fiber.dispose()}
 })
 
@@ -526,16 +530,22 @@ test('a summary that saves no space remains unpublished and does not buy another
     })
 })
 
-test('timeout releases an ignored-abort provider slot, rejects late output and avoids immediate retry', async () => {
-  let release
+test('timeout releases an ignored-abort provider slot, rejects late output and avoids immediate retry', {timeout:5000}, async () => {
+  let release, started
   const gate = new Promise(resolve => { release = resolve })
-  await withHost({ tailCount: 1, minRetainTokens: 0, foldBatchTokens: 1000, summaryTimeoutMs: 20 }, async () => { await gate; return 'late response' },
+  const providerStarted = new Promise(resolve => { started = resolve })
+  await withHost({ tailCount: 1, minRetainTokens: 0, foldBatchTokens: 1000, summaryTimeoutMs: 20 }, async () => { started(); await gate; return 'late response' },
     async ({ engine, session, agent, calls }) => {
       append(session, source); append(session, 'fresh tail')
       const selection = engine.planRolling(agent), other = { ...agent }
       assert.equal(engine.startBackgroundFold(agent, selection), true)
-      await new Promise(resolve => setTimeout(resolve, 40))
+      await providerStarted
+      if(!calls[0].signal.aborted)await new Promise((resolve,reject)=>{
+        const guard=setTimeout(()=>reject(Error('provider was not aborted after its idle deadline')),2000)
+        calls[0].signal.addEventListener('abort',()=>{clearTimeout(guard);resolve()},{once:true})
+      })
       assert.equal(calls[0].signal.aborted, true)
+      await engine.settleBackgroundFold(agent)
       assert.equal(engine.backgroundFolds.has(other), false)
       assert.equal(engine.startBackgroundFold(other, selection), false)
       release(); await engine.settleBackgroundFold(agent)
@@ -709,6 +719,23 @@ test('persisted ratio drafts restore exact source snapshots without another mode
     assert.equal(engine.restoreDraft(agent),false)
     assert.equal(engine.superLcmStore.loadDraft(session.id),null)
   })
+})
+
+test('a main-fork draft from the old parent-dropping tree semantics is not restored',async()=>{
+  const {createHash}=await import('node:crypto')
+  const {saveDraft,restoreDraft}=await import('../dsh/draft-persistence.js')
+  const {requestIdentity}=await import('../dsh/ratio-runtime.js')
+  const rollingConfig={budgetMode:'tokens',summaryMode:'main-fork'}
+  const agent={options:{},session:{id:'draft-version-fixture',requestHeader:()=>({config:{provider:'fixture',model:'m'},tools:[]}),surface:{nodes:[]}}}
+  let saved
+  const engine={rollingConfig,summaryRouteFingerprint:()=> 'fixture-route',controlRevision:'',
+    backgroundFolds:new Map(),superLcmStore:{saveDraft:(_session,fingerprint,data)=>{saved={fingerprint,data}},loadDraft:()=>saved}}
+  saveDraft(engine,agent,{status:'ready',summarized:{}})
+  const oldFingerprint=createHash('sha256').update(JSON.stringify([rollingConfig,'fixture-route','',requestIdentity(agent)])).digest('hex')
+  assert.notEqual(saved.fingerprint,oldFingerprint)
+  saved.fingerprint=oldFingerprint
+  assert.equal(restoreDraft(engine,agent),false)
+  assert.equal(engine.backgroundFolds.has(agent),false)
 })
 
 test('emergency ratio protection blocks an oversized latest turn without a blind provider retry',async()=>{

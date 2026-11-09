@@ -9,5 +9,5 @@ export async function forkRoute(ctx, request, selection, signal) {
   const window = info.context?.contextWindow
   const maxTokens = info.defaultMaxTokens ?? request.maxTokens ?? 0
   if (!Number.isSafeInteger(window) || !Number.isSafeInteger(maxTokens) || window - maxTokens < 1024) throw Error('所选后台模型缺少有效容量，原文保留')
-  return {ctx, request:{...request, provider:selection.provider, model:selection.model, maxTokens}, inputBudget:window - maxTokens}
+  return {ctx, request:{...request, provider:selection.provider, model:selection.model, maxTokens}, inputBudget:window - maxTokens,contextWindow:window}
 }

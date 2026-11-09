@@ -15,7 +15,7 @@ export function* jsonlTail(file, from = 0) {
         if (!line.length) throw Error('Mirror recovery found an empty record')
         yield { record: JSON.parse(line.toString('utf8')), end: offset }
       }
-      if (pending.length > 32e6) throw Error('Mirror recovery record exceeds 32 MB')
+      if (pending.length > 32*1024*1024) throw Error('Mirror recovery record exceeds 32 MB')
     }
     if (pending.length) throw Error('Mirror has a partial tail; capture paused')
   } finally { closeSync(fd) }

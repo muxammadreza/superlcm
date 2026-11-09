@@ -12,6 +12,8 @@ import { summarizeWithCodexCli } from './codex-cli.js'
 import { SUMMARY_SYSTEM, buildSummaryPrompt, checkedSummary } from './summary-policy.js'
 
 export const WRITER_CLI = { 'claude-code': 'claude', codex: 'codex', pi: 'pi' }
+// A request to the installed host hook uses its model API, not a spawned CLI.
+export const hostWriterTool=(harness,env=process.env)=>harness==='claude-code'?'claude-code':writerTool(harness,env)
 const ORDER = ['claude-code', 'codex', 'pi']
 // The conversation's own tool when its CLI is installed; otherwise (an imported conversation) the first installed one.
 export function writerTool(harness, env = process.env) {

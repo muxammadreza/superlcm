@@ -1,6 +1,6 @@
 {
   "name": "superlcm",
-  "description": "SuperLcm: five harnesses, one local conversation archive. Full originals, layered summaries and cross-harness continuation for Claude Code, Codex, Hermes, Pi and dsh harness.",
+  "description": "SuperLcm: four harnesses, one local conversation archive. Full originals, layered summaries and cross-harness continuation for Claude Code, Codex, Pi and dsh harness.",
   "owner": {
     "name": "ygc381792"
   },
@@ -8,7 +8,7 @@
     {
       "name": "superlcm",
       "source": "./",
-      "description": "Shared local conversation archive with background summaries, exact-source recall and continuation. All connections default to native host compaction; Claude Code takeover is an explicit optional setting."
+      "description": "Shared local conversation archive with background summaries, exact-source recall and continuation. Claude Code, Pi and dsh compaction takeover is optional."
     }
   ]
 }

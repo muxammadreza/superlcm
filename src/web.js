@@ -21,7 +21,7 @@ import { ClaudeStore } from './store.js'
 import { continuePacket } from './context.js'
 import { modelCatalog, harnessConnections } from './model-catalog.js'
 import { summaryMode } from './mode.js'
-import { saveApiKey, readApiKey, removeApiKey, apiKeyEndpoint } from './api-credentials.js'
+import { stageApiKey, bindApiKey, readApiKey, apiKeyEndpoint, apiCredentialCleanupPending, retryApiCredentialCleanup } from './api-credentials.js'
 import { loopbackEndpoint } from './api-endpoint.js'
 import { findCli } from './runtime.js'
 import { summaryEstimate, summarizeWithModel } from './summarize.js'
@@ -83,7 +83,7 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
     'GET /api/conversation': url => { const id = session(url);refreshConversationNames(store,{env,session:id,minIntervalMs:nameRefreshMs});const health=summaryHealth(store,id,{env});return { ...store.outline(id), writer_tool: writerTool(store.metadata(id).harness, env), bands: store.bands(id), setting: store.effectiveSetting(id, env), summarizing: health.active||store.summarizing(id),summary_health:health,summary_runs:store.summaryRunHistory(id),status: store.source(id).status, last_compaction: store.lastCompactionDiagnostic(id), reduced_summary_count: store.reducedSummaryCount(id), summary_error_detail: store.source(id).status === 'summary_error' ? store.summaryError(id) : null, backends: backends(id), estimate: health.estimate } },
     'GET /api/outline': url => store.outline(session(url), url.searchParams.get('node') || undefined),
     'GET /api/events': url => { const id = session(url); return { source: store.metadata(id), events: store.eventPreviews(id, int(url.searchParams.get('from'), 0), int(url.searchParams.get('to'), 0)) } },
-    'GET /api/search': url => { refreshConversationNames(store,{env,minIntervalMs:nameRefreshMs});return store.find(url.searchParams.get('q') || '', { harness: url.searchParams.get('harness') || undefined, limit: 30,excludeRetired:true }) },
+    'GET /api/search': url => { refreshConversationNames(store,{env,minIntervalMs:nameRefreshMs});return store.find(url.searchParams.get('q') || '', { harness: url.searchParams.get('harness') || undefined, limit: 30,excludeRetired:true,cursor:url.searchParams.has('cursor')?Number(url.searchParams.get('cursor')):undefined }) },
     'GET /api/continue': url => { const id = session(url), packet = continuePacket(store, id); return { line: continueLine(packet.source), code: packet.source.code, name: shortName(packet.source.name), packet } },
     'POST /api/rename': async req => { const x = await body(req); if (!store.source(x.session)) throw new Error('Unknown conversation'); return store.nameSession(x.session, x.name) },
     'POST /api/summarize': async req => {
@@ -135,7 +135,7 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
     'POST /api/delete': async req => { const x = await body(req); return store.deleteSession(x.session) },
     'POST /api/delete-preview': async req => { const x = await body(req); const rows = store.staleSessions(x.before_ms, x.harness || undefined).filter(row=>row.harness!=='hermes'); return { count: rows.length, records: rows.reduce((n, r) => n + r.records, 0), sample: rows.slice(0, 8).map(r => ({ name: r.name || r.session, harness: r.harness, updated_ms: r.updated_ms })) } },
     // The client confirms the exact count it previewed, so a conversation that became stale meanwhile is not removed unseen.
-    'POST /api/delete-bulk': async req => { const x = await body(req); const rows = store.staleSessions(x.before_ms, x.harness || undefined).filter(row=>row.harness!=='hermes'); if (rows.length !== x.expect_count) throw new Error('The matching conversations changed; preview again'); for (const r of rows) store.deleteSession(r.session); return { deleted: rows.length } },
+    'POST /api/delete-bulk': async req => { const x = await body(req); const rows = store.staleSessions(x.before_ms, x.harness || undefined).filter(row=>row.harness!=='hermes'); if (rows.length !== x.expect_count) throw new Error('The matching conversations changed; preview again'); let file_cleanup_pending=0;for (const r of rows) if(store.deleteSession(r.session).file_cleanup_pending)file_cleanup_pending++; return { deleted: rows.length, ...(file_cleanup_pending?{file_cleanup_pending}:{}) } },
     'GET /api/storage': () => store.storageStats(),
     'POST /api/connection-check': async req => { const x = await body(req); return x.harness === 'claude-code' ? claudeProbe(store, { env }) : testHarness(store, x.harness, { env }) },
     'POST /api/setup-preview': async req => { const x = await body(req); return publicPreview(await setupPreview(store, x.harness, { env,provider_ref:x.provider_ref,provider:x.provider,model:x.model })) },
@@ -146,6 +146,8 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
     'GET /api/models': url => catalog(url.searchParams.get('backend'), { env }),
     // Kept fast: no tool detection here, so saving a choice on a card answers at once.
     'GET /api/settings': async () => {
+      retryApiCredentialCleanup(store.db,store.dir)
+      let file_cleanup_pending;try{file_cleanup_pending=store.cleanupDeletedFiles()}catch{file_cleanup_pending=store.db.prepare('SELECT COUNT(DISTINCT session) n FROM deleted_session_files').get().n}
       const settings = store.harnessSettings().filter(x=>x.harness!=='hermes')
       let dshRatio=.8
       try{dshRatio=readControls(controlsPath(store))?.config.switchRatio??.8}catch{dshRatio=null}
@@ -155,6 +157,8 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
         index_home: store.dir,
         settings: settings.map(x => ({ ...x, api_key_configured: store.hasApiCredential(store.harnessKeyScope(x.harness, x)) })),
         api_models: store.apiModels().map(m => ({ ...m, key_configured: store.hasApiCredential('model:' + m.id), used_by: settings.filter(x => x.api_ref === m.id).map(x => x.harness) })),
+        credential_cleanup_pending: store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='credential_gc_queue'").get()?store.db.prepare('SELECT scope FROM credential_gc_queue ORDER BY scope').all().map(x=>x.scope):[],
+        file_cleanup_pending,
         tuning: store.tuning(),
         takeover: { ...store.takeover(), previous: undefined, claude_window: claudeCompactWindow(env), plugin: claudePluginEnabled(env) }
       }
@@ -168,21 +172,39 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
       if (x.id && !before) throw new Error('Unknown API model')
       const m = store.checkApiModel({ provider: x.api_provider || null, url: x.api_url || null, model: x.model || null, label: x.label || null, effort: x.effort || null })
       // The key: typed now, else this model's own (same endpoint), else one saved for the same endpoint.
-      let key = x.api_key || (before && before.url === m.url ? readApiKey(store.dir, 'model:' + before.id) : null)
+      const beforeKey=before&&before.url===m.url?readApiKey(store.dir,'model:'+before.id,m.url):null
+      let key = x.api_key || beforeKey
       if (!key) { const donor = store.apiModels().find(y => y.id !== x.id && y.url === m.url && store.hasApiCredential('model:' + y.id)); if (donor) key = readApiKey(store.dir, 'model:' + donor.id) }
       if (!key && !loopbackEndpoint(m.url)) throw new Error(before ? 'A new endpoint needs its API key' : 'Enter an API key for this model')
+      const probedKey=key
       if (x.skip_test !== true) {
         try { await probeModel({ model: m.model, apiKey: key || '', apiProvider: m.provider, apiURL: m.url, effort: m.effort }) }
         catch (error) { throw new Error('Test call failed: ' + String(error?.message || error).slice(0, 400)) }
       }
-      const saved = store.saveApiModel({ id: x.id || null, ...m })
-      if (key) saveApiKey(store.dir, 'model:' + saved.id, key, m.url)
-      else if (before && before.url !== m.url) removeApiKey(store.dir, 'model:' + saved.id)
-      return { ...saved, key_configured: store.hasApiCredential('model:' + saved.id), tested: x.skip_test !== true }
+      let saved
+      store.db.exec('BEGIN IMMEDIATE')
+      try{
+        const current=x.id?store.apiModel(x.id):null
+        const currentKey=current&&current.url===m.url?readApiKey(store.dir,'model:'+current.id,m.url):null
+        // A blank key means keep the current key. A slow probe must not
+        // overwrite a newer key that was saved for this same endpoint.
+        if(!x.api_key&&before&&before.url===m.url&&current?.url===m.url&&currentKey!==beforeKey){
+          key=currentKey
+          if(!key&&!loopbackEndpoint(m.url))throw Error('The API key changed while testing; save this model again')
+        }
+        const tested=x.skip_test!==true&&key===probedKey
+        saved = store.saveApiModel({ id: x.id || null, ...m })
+        const scope='model:'+saved.id
+        if (key&&(!current||current.url!==m.url||key!==currentKey))bindApiKey(store.db,scope,stageApiKey(store.dir,scope,key,m.url))
+        else if (!key&&current&&current.url!==m.url)bindApiKey(store.db,scope,null)
+        store.db.exec('COMMIT')
+        saved={...saved,tested}
+      }catch(error){store.db.exec('ROLLBACK');throw error}
+      return { ...saved, key_configured: store.hasApiCredential('model:' + saved.id) }
     },
     // 接管压缩 on/off and its size; turning it on also sets Claude Code's autoCompactWindow (see src/takeover.js).
     'POST /api/takeover': async req => { const x = await body(req); const r = applyTakeover(store, { enabled: x.enabled === true, ratio: x.ratio, window: x.window === undefined ? undefined : Number(x.window), keep: x.keep === undefined ? undefined : Number(x.keep) }, env); return { ...r, previous: undefined, plugin: claudePluginEnabled(env) } },
-    'POST /api/api-models/delete': async req => { const x = await body(req); return { deleted: store.deleteApiModel(x.id) } },
+    'POST /api/api-models/delete': async req => { const x = await body(req),deleted=store.deleteApiModel(x.id); return { deleted, credential_cleanup_pending:apiCredentialCleanupPending(store.db,'model:'+x.id) } },
     'POST /api/fallbacks': async req => {
       const x = await body(req)
       if (x.harness === 'hermes') throw new Error('Unsupported tool')
@@ -204,21 +226,31 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
       const scope = x.scope === 'global' ? 'global' : 'harness:' + x.harness
       const model = x.model || null, provider = x.api_provider || null, address = x.api_url || null, key = x.api_key
       const checked = store.validateSetting(x.mode, model, provider, address)
+      let chosenKey=null
       if (x.mode === 'api') {
         if (key !== undefined && typeof key !== 'string') throw new Error('API key must be text')
         const prior = x.scope === 'global' ? store.globalSetting() : store.harnessSetting(x.harness)
         const sameEndpoint = prior?.mode === 'api' && !prior.api_ref && prior.api_url === checked.api_url
-        let chosenKey = key || (sameEndpoint || apiKeyEndpoint(store.dir, scope) === checked.api_url ? readApiKey(store.dir, scope, checked.api_url) : null)
+        const oldKey=sameEndpoint||apiKeyEndpoint(store.dir,scope)===checked.api_url?readApiKey(store.dir,scope,checked.api_url):null
+        chosenKey = key || oldKey
         // Same endpoint as the default setting or another tool: reuse the key already saved there.
         if (!chosenKey) {
           const donor = [['global', store.globalSetting()], ...store.harnessSettings().map(y => [store.harnessKeyScope(y.harness, y), y])].find(([s, y]) => s !== scope && y?.mode === 'api' && y.api_url === checked.api_url && store.hasApiCredential(s))
           if (donor) chosenKey = readApiKey(store.dir, donor[0], checked.api_url)
         }
         if (!chosenKey && !loopbackEndpoint(checked.api_url)) throw new Error('A new endpoint needs its API key; enter and save it for this setting')
-        if (chosenKey) saveApiKey(store.dir, scope, chosenKey, checked.api_url)
-        else if (!sameEndpoint) removeApiKey(store.dir, scope)
       } else if (key) throw new Error('API key is accepted only for custom API mode')
-      const result = x.scope === 'global' ? store.setGlobalSetting(x.mode, model, provider, address) : store.setHarnessSetting(x.harness, x.mode, model, provider, address)
+      let result
+      store.db.exec('BEGIN IMMEDIATE')
+      try{
+        const current=x.scope==='global'?store.globalSetting():store.harnessSetting(x.harness)
+        const same=current?.mode==='api'&&!current.api_ref&&current.api_url===checked.api_url
+        const oldKey=x.mode==='api'&&(same||apiKeyEndpoint(store.dir,scope)===checked.api_url)?readApiKey(store.dir,scope,checked.api_url):null
+        const changeCredential=x.mode==='api'&&(chosenKey?chosenKey!==oldKey:!same)
+        result=x.scope === 'global' ? store.setGlobalSetting(x.mode, model, provider, address) : store.setHarnessSetting(x.harness, x.mode, model, provider, address)
+        if(changeCredential)bindApiKey(store.db,scope,chosenKey?stageApiKey(store.dir,scope,chosenKey,checked.api_url):null)
+        store.db.exec('COMMIT')
+      }catch(error){store.db.exec('ROLLBACK');throw error}
       return { ...result, api_key_configured: store.hasApiCredential(scope) }
     },
     'POST /api/probe': async req => { await body(req); return probeMcp({ env: { ...process.env, SUPERLCM_HOME: store.dir } }) }

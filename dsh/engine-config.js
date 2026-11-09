@@ -2,6 +2,7 @@ import z from '@deepseek-ai/schemastery'
 import {ratioOptions} from './ratio-policy.js'
 import { isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction'
 import { extractChildNodeIds } from './marker.js'
+import {DSH_SUMMARY_TIMEOUT_MS} from './summary-timeout.js'
 
 const DEPRECATED_CONFIG_KEYS = new Set(['cacheTtlSeconds', 'thresholdRatio', 'retainRatio'])
 const FALLBACK_CONFIG_KEYS = new Set(['fallbackSummarizationProvider', 'fallbackSummarizationModel'])
@@ -40,7 +41,7 @@ const ROLLING_DEFAULTS = Object.freeze({
   foldTiming: 'background',
   summaryPrefixTargetTokens: 0,
   condensedMinFanout: 4,
-  summaryTimeoutMs: 180000,
+  summaryTimeoutMs: DSH_SUMMARY_TIMEOUT_MS,
   summaryRetryCooldownMs: 30000,
 })
 

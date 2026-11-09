@@ -21,11 +21,12 @@ export function readPiPolicy(home, suppliedDB) {
   const db=suppliedDB||new DatabaseSync(file,{readOnly:true})
   try {
     const own=db.prepare("SELECT mode,model FROM harness_summary_settings WHERE harness='pi'").get()
-    const global=db.prepare('SELECT mode FROM global_summary_settings WHERE id=1').get()
+    const global=db.prepare('SELECT mode,model FROM global_summary_settings WHERE id=1').get()
     const connected=db.prepare("SELECT enabled FROM integrations WHERE harness='pi'").get()?.enabled!==0
     const mode=connected?((own||global)?.mode||'main-fork'):'off'
     const tuning=db.prepare('SELECT target_chars,target_tokens,fanout FROM summary_tuning WHERE id=1').get()||{target_tokens:20000,fanout:4}
-    return {...policy,enabled:policy.enabled&&mode!=='off',summaryEnabled:mode!=='off',summaryMode:mode==='api'?'api':'main-fork',targetTokens:tuning.target_tokens||Math.floor((tuning.target_chars||80000)/4),fanout:tuning.fanout,...(own?.mode==='main-fork'&&own.model?{summaryModel:own.model}:{})}
+    const route=mode==='auto'?'main-fork':mode,supported=['api','main-fork'].includes(route),selected=own||global
+    return {...policy,enabled:policy.enabled&&supported,summaryEnabled:supported,summaryMode:route,targetTokens:tuning.target_tokens||Math.floor((tuning.target_chars||80000)/4),fanout:tuning.fanout,...(selected?.mode==='main-fork'&&selected.model?{summaryModel:selected.model}:{})}
   }finally{if(!suppliedDB)db.close()}
 }
 export function savePiPolicy(store, value) {

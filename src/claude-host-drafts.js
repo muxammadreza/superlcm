@@ -14,9 +14,10 @@ export function hostDraft(store,session,work,revision) {
 }
 export function retainHostDraft(store,session,work,claim,input,summary) {
   initialize(store)
-  store.db.prepare(`INSERT INTO claude_host_drafts VALUES(?,?,?,?,?,?,?,?)
+  const result=store.db.prepare(`INSERT INTO claude_host_drafts SELECT ?,?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM sources WHERE session=?) AND NOT EXISTS(SELECT 1 FROM deleted_sessions WHERE session=?)
     ON CONFLICT(session,batch_id,revision) DO UPDATE SET claim_id=excluded.claim_id,proof=excluded.proof,summary=excluded.summary,model=excluded.model,overshoot=excluded.overshoot`)
-    .run(session,work.batch_id,claim.revision,claim.claim_id,proof(work),summary,String(input.model||'configured').slice(0,80),Number.isFinite(input.overshoot)?input.overshoot:null)
+    .run(session,work.batch_id,claim.revision,claim.claim_id,proof(work),summary,String(input.model||'configured').slice(0,80),Number.isFinite(input.overshoot)?input.overshoot:null,session,session)
+  if(!result.changes)throw Error('Conversation was deleted; summary not saved')
 }
 // A lost process receipt must not require a new lease or buy a new summary.
 // It only acknowledges this exact output of the exact original claim.

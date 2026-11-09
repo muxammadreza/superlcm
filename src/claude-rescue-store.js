@@ -17,11 +17,13 @@ const rowFor=(store,session,id)=>store.db.prepare('SELECT * FROM claude_compacti
 function valid(store,session,row,{claimId,deadline=true,cancelId}={}) {
   if(!row||!['generating','ready','saved'].includes(row.state)||claimId&&row.claim_id!==claimId||deadline&&row.state==='generating'&&Date.now()>=row.deadline_ms)return false
   const p=JSON.parse(row.preparation)
+  // Older prepared rescues may have skipped images or unverified tool data.
+  if(p.evidenceVersion!==3)return false
   if(rescueCancelled(store.dir,session,row.claim_id,p.cancelId,cancelId))return false
   if(!store.source(session)||store.isDeleted(session)||!store.integrationEnabled('claude-code')||!store.takeover().enabled||store.metadata(session).harness!=='claude-code')return false
   if(row.revision!==summarySettingsRevision(store,session)||p.settingHash!==rescueHash(store.takeover())||p.sourceHash!==rescueSourceHash(store,session,p.through))return false
   if(p.surfaceHash!==rescueSourceHash(store,session,Number.MAX_SAFE_INTEGER))return false
-  for(const [id,hash] of p.childHashes)if(rescueHash(store.node(session,id)?.summary||'')!==hash)return false
+  for(const [id,hash] of p.childHashes){const child=store.node(session,id);if(!child||store.nodeSourceIncomplete(session,child)||rescueHash(child.summary)!==hash)return false}
   for(const e of store.eventRows(session).filter(e=>e.ordinal<=p.through))store.exact(session,e.ordinal)
   return !rescueCancelled(store.dir,session,row.claim_id,p.cancelId,cancelId)
 }
@@ -44,29 +46,31 @@ export function prepareClaudeRescue(store,session,input) {
   if(rescueCancelled(store.dir,session,input.cancel_id))return {use:false}
   const src=store.source(session)
   if(!src||store.isDeleted(session)||!store.takeover().enabled||!store.integrationEnabled('claude-code')||store.metadata(session).harness!=='claude-code')return {use:false}
-  if(existsSync(src.path))store.ingest(session,src.path)
+  if(existsSync(src.path)&&store.ingest(session,src.path,'jsonl',{automatic:true}).skipped)return {use:false}
   const work=prepareRescueSource(store,session,input)
   if(!work)return {use:false}
   const p=work.preparation,old=rowFor(store,session,p.nodeId)
   if(old&&valid(store,session,old,{deadline:false})&&['ready','saved'].includes(old.state))return publish(store,session,old,input.cancel_id)
-  if(old?.state==='generating'&&Date.now()<old.deadline_ms||old?.failed_until>Date.now())return {use:false,busy:true}
+  if(old?.state==='generating'&&Date.now()<old.deadline_ms&&valid(store,session,old,{deadline:false})||
+    old?.state==='failed'&&old.failed_until>Date.now()&&JSON.parse(old.preparation).evidenceVersion===3)return {use:false,busy:true}
   const claimId=randomUUID(),deadline=Date.now()+90000,revision=summarySettingsRevision(store,session)
-  store.db.prepare(`INSERT INTO claude_compaction_rescues VALUES(?,?,?,?,?,?,?,NULL,0)
+  const inserted=store.db.prepare(`INSERT INTO claude_compaction_rescues SELECT ?,?,?,?,?,?,?,NULL,0 WHERE EXISTS(SELECT 1 FROM sources WHERE session=?) AND NOT EXISTS(SELECT 1 FROM deleted_sessions WHERE session=?)
     ON CONFLICT(session,node_id) DO UPDATE SET claim_id=excluded.claim_id,state=excluded.state,deadline_ms=excluded.deadline_ms,revision=excluded.revision,preparation=excluded.preparation,summary=NULL,failed_until=0`)
-    .run(session,p.nodeId,claimId,'generating',deadline,revision,JSON.stringify(p))
+    .run(session,p.nodeId,claimId,'generating',deadline,revision,JSON.stringify(p),session,session)
+  if(!inserted.changes)return {use:false}
   return {work:{node_id:p.nodeId,claim_id:claimId,deadline_ms:deadline,input_hash:p.inputHash,model:p.model,system:work.system,prompt:work.prompt,task:work.task,maxTokens:work.maxTokens}}
 }
 export function checkClaudeRescue(store,session,input) {
   initialize(store)
   if(rescueCancelled(store.dir,session,input.cancel_id))return {use:false}
-  const src=store.source(session);if(src&&existsSync(src.path))store.ingest(session,src.path)
+  const src=store.source(session);if(src&&existsSync(src.path)&&store.ingest(session,src.path,'jsonl',{automatic:true}).skipped)return {valid:false}
   const row=rowFor(store,session,input.node_id)
   return {valid:!!row&&input.input_hash===JSON.parse(row.preparation).inputHash&&valid(store,session,row,{claimId:input.claim_id,cancelId:input.cancel_id})}
 }
 export function saveClaudeRescue(store,session,input) {
   initialize(store)
   if(rescueCancelled(store.dir,session,input.cancel_id))return {use:false}
-  const src=store.source(session);if(src&&existsSync(src.path))store.ingest(session,src.path)
+  const src=store.source(session);if(src&&existsSync(src.path)&&store.ingest(session,src.path,'jsonl',{automatic:true}).skipped)return {use:false}
   let row=rowFor(store,session,input.node_id)
   if(!row||input.input_hash!==JSON.parse(row.preparation).inputHash||!valid(store,session,row,{claimId:input.claim_id,cancelId:input.cancel_id}))return {use:false}
   const p=JSON.parse(row.preparation)

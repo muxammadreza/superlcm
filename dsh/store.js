@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { home as archiveHome } from '../src/store.js'
 import { CompressionReporter } from '../src/compression-status.js'
+import {createOutputBudgetState} from './output-budget.js'
 
 const SCHEMA_VERSION = 4
 
@@ -78,6 +79,7 @@ export class SuperLcmStore {
 
   #migrate() {
     this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS deleted_sessions(session TEXT PRIMARY KEY,deleted_ms INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS lcm_summary_blocks (
         session_id TEXT NOT NULL, fingerprint TEXT NOT NULL, created_at INTEGER NOT NULL,
         PRIMARY KEY (session_id,fingerprint)
@@ -158,6 +160,8 @@ export class SuperLcmStore {
   }
 
   compressionReporter(options) { return new CompressionReporter(this.#db, options) }
+  outputBudgetState() { return createOutputBudgetState(this.#db) }
+  isDeletedSession(sessionId) { this.#assertOpen();return !!this.#db.prepare('SELECT 1 FROM deleted_sessions WHERE session=?').get('dsh-'+sessionId) }
 
   archivedSessionIds() {
     if (!this.#db.prepare("SELECT 1 FROM sqlite_master WHERE name='dsh_mirrors'").get()) return []
@@ -174,6 +178,7 @@ export class SuperLcmStore {
 
     this.#db.exec('BEGIN IMMEDIATE')
     try {
+      if(this.isDeletedSession(node.sessionId)){this.#db.exec('COMMIT');return null}
       this.#db.prepare(`
         INSERT INTO lcm_nodes(
           session_id, node_id, compaction_id, summary_seq, created_at,
@@ -245,10 +250,10 @@ export class SuperLcmStore {
     this.#assertOpen()
     if (!Number.isSafeInteger(seq)) return this.indexCursor(sessionId)
     this.#db.prepare(`
-      INSERT INTO lcm_scan_state(session_id, last_scanned_seq) VALUES (?, ?)
+      INSERT INTO lcm_scan_state(session_id, last_scanned_seq) SELECT ?, ? WHERE NOT EXISTS(SELECT 1 FROM deleted_sessions WHERE session=?)
       ON CONFLICT(session_id) DO UPDATE SET
         last_scanned_seq = MAX(last_scanned_seq, excluded.last_scanned_seq)
-    `).run(sessionId, seq)
+    `).run(sessionId, seq,'dsh-'+sessionId)
     return this.indexCursor(sessionId)
   }
 
@@ -409,9 +414,9 @@ export class SuperLcmStore {
 
   saveDraft(sessionId, fingerprint, data) {
     this.#assertOpen()
-    this.#db.prepare(`INSERT INTO lcm_compaction_drafts VALUES (?,?,?,'ready',?)
+    this.#db.prepare(`INSERT INTO lcm_compaction_drafts SELECT ?,?,?,'ready',? WHERE NOT EXISTS(SELECT 1 FROM deleted_sessions WHERE session=?)
       ON CONFLICT(session_id) DO UPDATE SET fingerprint=excluded.fingerprint,
-      data_json=excluded.data_json,status='ready',updated_at=excluded.updated_at`).run(sessionId,fingerprint,data,Date.now())
+      data_json=excluded.data_json,status='ready',updated_at=excluded.updated_at`).run(sessionId,fingerprint,data,Date.now(),'dsh-'+sessionId)
   }
   loadDraft(sessionId) {
     this.#assertOpen()

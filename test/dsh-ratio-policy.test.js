@@ -4,11 +4,11 @@ import { deriveRatioPolicy, ratioOptions, automaticRatios } from '../dsh/ratio-p
 import { selectRollingRange } from '../dsh/rolling.js'
 import { controlsConfig } from '../dsh/controls-config.js'
 
-test('thresholds use current input capacity after output reservation',()=>{
+test('thresholds use the full window while output capacity stays separately guarded',()=>{
   const policy=deriveRatioPolicy({foldBatchTokens:20000},{contextWindow:1000000,reservedCompletionTokens:100000})
-  assert.equal(policy.prepareActiveTokens,630000)
-  assert.equal(policy.softActiveTokens,720000)
-  assert.equal(policy.hardActiveTokens,810000)
+  assert.equal(policy.prepareActiveTokens,700000)
+  assert.equal(policy.softActiveTokens,800000)
+  assert.equal(policy.hardActiveTokens,898976)
   assert.equal(policy.minRetainTokens,36000)
   assert.equal(policy.summaryPrefixTargetTokens,54000)
   assert.equal(policy.postTargetTokens,90000)
@@ -55,12 +55,12 @@ test('a 10K ratio chunk does not inherit an incompatible hidden legacy pressure 
   assert.equal(config.pressureFoldTokens,10000)
 })
 
-test('user thresholds scale with each model window and its output reservation',()=>{
+test('user thresholds scale with the full model window',()=>{
   const base={foldBatchTokens:20000,prepareRatio:.6,switchRatio:.82,emergencyRatio:.95}
   const small=deriveRatioPolicy(base,{contextWindow:100000,reservedCompletionTokens:10000})
   const large=deriveRatioPolicy(base,{contextWindow:1000000,reservedCompletionTokens:100000})
-  assert.equal(small.prepareActiveTokens,54000);assert.equal(small.softActiveTokens,73800);assert.equal(small.hardActiveTokens,85500)
-  assert.equal(large.prepareActiveTokens,540000);assert.equal(large.softActiveTokens,738000);assert.equal(large.hardActiveTokens,855000)
+  assert.equal(small.prepareActiveTokens,60000);assert.equal(small.softActiveTokens,82000);assert.equal(small.hardActiveTokens,88976)
+  assert.equal(large.prepareActiveTokens,600000);assert.equal(large.softActiveTokens,820000);assert.equal(large.hardActiveTokens,898976)
 })
 
 test('legal early thresholds shrink automatic retention and summary budgets too',()=>{
@@ -80,7 +80,7 @@ test('recent-original presets are honored and shrink safely with the routed inpu
  const p=keep=>deriveRatioPolicy({foldBatchTokens:20000,keepRecentTokens:keep},{contextWindow:1000000,reservedCompletionTokens:100000})
  assert.equal(p(20000).minRetainTokens,20000);assert.equal(p(80000).minRetainTokens,80000)
  const small=deriveRatioPolicy({foldBatchTokens:20000,keepRecentTokens:200000,...automaticRatios(.5)},{contextWindow:64000,reservedCompletionTokens:16000,fixedTokens:4000})
- assert.equal(small.minRetainTokens,10000)
+ assert.equal(small.minRetainTokens,14000)
  assert.ok(small.minRetainTokens+small.summaryPrefixTargetTokens+4000<small.softActiveTokens)
  assert.ok(small.postTargetTokens<small.hardActiveTokens)
  assert.equal(small.protectLatestUser,true)

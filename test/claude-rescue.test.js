@@ -68,10 +68,9 @@ for(const change of ['off','summary-setting','main-model'])test('in-flight '+cha
   assert.equal((await hook.run()).fallback,true);assert.equal(h.unchanged(before).nodes.length,before.nodes.length)
 })
 
-test('real native checkpoint and post-native source are verified without reviving pre-native raw history',async()=>{
+test('native checkpoint cannot certify pre-native history that is not already fully covered',async()=>{
   const h=fixture({rows:history({native:true})});await h.seed();const before=h.snapshot(),hook=await h.hook(),r=await hook.run()
-  assert.ok(r.messages,JSON.stringify(r));assert.equal(h.calls.length,1);assert.ok(h.calls[0].prompt.includes('verified native checkpoint'))
-  assert.ok(!h.calls[0].prompt.includes('Archived result 2:5'));h.unchanged(before)
+  assert.equal(r.fallback,true);assert.equal(h.calls.length,0);h.unchanged(before)
 })
 
 test('unrecorded content or ambiguous repeated complete timeline cannot supply rescue source',async()=>{
@@ -101,6 +100,20 @@ test('cancelled final draft refuses direct late save and takeover-off or subagen
   const s=h.open();try{s.setTakeover({...s.takeover(),enabled:false})}finally{s.close()}
   const hook=await h.hook();assert.equal((await hook.run()).fallback,true);assert.equal(h.calls.length,0)
   const sub=await hook.handlers.get('session.compact')(hook.$,{agentId:'sub',messages:h.messages},()=>({fallback:true}));assert.equal(sub.fallback,true);assert.equal(h.calls.length,0)
+})
+
+test('a rescue prepared with old source checks cannot be published after an upgrade',async()=>{
+  const h=fixture();await h.seed();const input={messages:h.messages.map(liveMessage),tokens:h.tokens,window:h.window,model:'offline-current'}
+  const {work}=await h.cli('compact-rescue-prepare',input);assert.ok(work)
+  const identity={node_id:work.node_id,claim_id:work.claim_id,input_hash:work.input_hash}
+  const s=h.open();try{
+    const row=s.db.prepare('SELECT preparation FROM claude_compaction_rescues WHERE session=? AND node_id=?').get(h.id,work.node_id)
+    const old=JSON.parse(row.preparation);delete old.evidenceVersion
+    s.db.prepare('UPDATE claude_compaction_rescues SET preparation=? WHERE session=? AND node_id=?').run(JSON.stringify(old),h.id,work.node_id)
+  }finally{s.close()}
+  assert.equal((await h.cli('compact-rescue-check',identity)).valid,false)
+  assert.equal((await h.cli('compact-rescue-save',{...identity,isAnswered:true,summary:output})).use,false)
+  const fresh=await h.cli('compact-rescue-prepare',input);assert.ok(fresh.work,'a new verified attempt can replace the stale preparation')
 })
 
 test('ignored final timeout is bounded and late completion cannot publish',async()=>{

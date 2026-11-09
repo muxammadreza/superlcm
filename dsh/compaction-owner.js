@@ -3,6 +3,7 @@ import Engine from './engine.js'
 import { readControls } from './controls-config.js'
 import { SuperLcmStore, resolveDatabasePath } from './store.js'
 import { join } from 'node:path'
+import {registerOutputBudget} from './output-budget.js'
 
 function cancellable(promise, signal) {
   if (!signal) return promise
@@ -63,7 +64,7 @@ function owned(Base) {
 const Takeover = owned(Engine), Native = owned(Basic)
 
 export async function mountCompactionOwner(ctx, config = {}) {
-  let fiber, engine, handlers = new Map(), reporter, store, revision, closed = false, pending
+  let fiber, engine, engineContext, handlers = new Map(), reporter, store, revision, closed = false, pending
   let invalidControls=false
   const current = () => {
     try {const document=readControls(config.controlFile);invalidControls=false;return document||(config.controlFile?{revision:'missing-controls',config:{auto:false},invalid:true}:{revision:'',config})}
@@ -104,6 +105,7 @@ export async function mountCompactionOwner(ctx, config = {}) {
           return () => { const at = list.indexOf(callback); if (at >= 0) list.splice(at, 1) }
         }
       } })
+      engineContext=scoped
       engine = new selected(scoped, options)
     } }
     fiber = ctx.plugin(plugin)
@@ -135,6 +137,7 @@ export async function mountCompactionOwner(ctx, config = {}) {
     }
     if (!enabled) {
       store = new SuperLcmStore(config.archiveHome ? join(config.archiveHome, 'lcm.sqlite') : resolveDatabasePath())
+      registerOutputBudget(engine,store,{restoreOnly:true,context:engineContext})
       reporter = store.compressionReporter({ kind: 'engine', profile: ctx.get?.('profileContext')?.name || null,
         enabled: false, routeReady: true, onError: () => ctx.logger?.warn?.('DSH 原生压缩状态写入失败') })
       if (document.config.auto === false&&!document.invalid) reporter.applied(document.revision)

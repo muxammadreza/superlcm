@@ -3,11 +3,12 @@
 // These are planning estimates, not a provider's measured billing tokens.
 const eastAsian=/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u3000-\u303f\uff00-\uffef]/u
 const units=char=>eastAsian.test(char)?6:char.codePointAt(0)>0xffff?8:1
-export function estimateSummaryTokens(text) {
+export function summaryTokenUnits(text) {
   let total=0
   for(const char of text)total+=units(char)
-  return Math.ceil(total/4)
+  return total
 }
+export function estimateSummaryTokens(text) {return Math.ceil(summaryTokenUnits(text)/4)}
 export function takeTokenPrefix(text,budget) {
   let total=0,end=0
   for(const char of text) {
