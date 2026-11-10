@@ -1,5 +1,10 @@
 # Changelog
 
+## Fork 0.6.6 — 2026-11-09
+
+- Fix every Claude Code compaction going native after the upstream merge (`incomplete-source summaries are navigation only`). Upstream's new source-completeness rule marked every Claude summary incomplete: it only knew older record types, so current Claude Code bookkeeping records (`bridge-session`, `relocated`, `agent-name`, `atis-latch`, `tools-used`, `mode`, `frame-link`, ...), harness attachments (hook output, listings, reminders, date, environment) and ToolSearch `tool_reference` results all counted as unrepresented content; and a long record shortened in the summary prompt (head, tail and an `lcm_read` pointer, as before) marked the piece reduced, cut it to 5,500 characters and kept it out of coverage for good. In 97 leaves written since the merge, none was usable. Now records with no dialogue fields, known Claude Code attachments, compaction and informational system notes and tool references do not block, and a shortened long record does not reduce a Claude summary. Unknown attachment kinds with content, queued prompts typed mid-turn and unknown records with `message`/`content` still block; an image does not block coverage.
+- Summaries written before quality tracking (fork 0.6.3 and earlier) or marked incomplete by the old rule are checked once per conversation against the archive with the current rule, the same checks a new summary gets; those that pass authorize takeover again without being written twice. On the recorded store, 4,729 summaries in 202 conversations passed. Pieces that were cut to 5,500 characters are written again.
+
 ## Fork 0.6.5 — 2026-11-09
 
 - The main-fork writer inside Claude Code (`$.model.fork`) now checks the transcript source before saving, as upstream's fork path does, and no longer passes the old output estimate as a hard limit.

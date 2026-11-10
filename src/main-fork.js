@@ -151,7 +151,7 @@ export function saveForkTree(store,session,plan,tree,{model,usage={},branchId=nu
       const raw=store.exact(session,row.ordinal)
       if(store.db.prepare('SELECT digest FROM events WHERE session=? AND ordinal=?').get(session,row.ordinal)?.digest!==row.digest)throw Error('摘要原文已变化，结果未保存')
       if(claude){
-        if(hasUnrepresentedContent(raw,'jsonl',{strictRecords:true}))unrepresented.push(row.ordinal)
+        if(hasUnrepresentedContent(raw,'jsonl',{strictRecords:true,allowImages:true}))unrepresented.push(row.ordinal)
       }
     }
     if(claude&&supplementProof&&uncertainBefore>supplementBoundary)throw Error('对话在摘要准备时发生压缩，原文保留，等待重新准备')

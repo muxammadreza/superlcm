@@ -176,6 +176,7 @@ export function summaryWork(store, session, options = {}) {
   const claude=store.metadata(session).harness==='claude-code'
   const { batchSize = segmentMessages(), fanout = saved.fanout } = options
   const budget=budgetFor(saved,options)
+  if(claude)store.recertifyClaudeNodes(session)
   const done = [...store.nodeRows(session, 0),...claudeCheckpoints(store,session)].sort((a,b)=>a.last-b.last)
   let start = nextSummaryStart(store,session,done)
   let events = summaryEvents(store, session, start)
@@ -186,12 +187,12 @@ export function summaryWork(store, session, options = {}) {
   if (end < 0) break
   const batch = events.slice(0, end + 1)
   const language=detectSummaryLanguage(store.source(session).kind==='text'?excerptUserTexts(batch.map(e=>store.exact(session,e.ordinal)).join('')):batch.map(e=>store.exact(session,e.ordinal)).filter(raw=>!isRequestCopy(raw)).map(userTextFromRecord),fallback)
-  const digest = hash(JSON.stringify([SUMMARY_POLICY_VERSION,...(claude?['claude-coverage-v4']:[]),language.code,...batch.map(e => e.digest)]))
+  const digest = hash(JSON.stringify([SUMMARY_POLICY_VERSION,...(claude?['claude-coverage-v5']:[]),language.code,...batch.map(e => e.digest)]))
   const base = { session, batch_id: nodeId(session, 0, batch[0].ordinal, batch.at(-1).ordinal, digest), level: 0, first: batch[0].ordinal, last: batch.at(-1).ordinal, children: [], digest,
     ...(store.metadata(session).harness==='dsh'?{source_records:batch.filter(visibleEvent).map(e=>e.ordinal)}:{}) }
   const previous=done.filter(n=>n.last<base.first&&(store.metadata(session).harness!=='claude-code'||!n.sourceIncomplete)).at(-1)
   const task={...base,language,requireHeading:true,kind:'leaf',policy_version:SUMMARY_POLICY_VERSION,
-    reducedSources:batch.some(e=>hasUnrepresentedContent(store.exact(session,e.ordinal),store.source(session).kind,{strictRecords:store.metadata(session).harness==='claude-code'}))||batch.filter(visibleEvent).some(e=>recordText(e,budget)!==e.summaryText),
+    reducedSources:batch.some(e=>hasUnrepresentedContent(store.exact(session,e.ordinal),store.source(session).kind,{strictRecords:store.metadata(session).harness==='claude-code',allowImages:true}))||!claude&&batch.filter(visibleEvent).some(e=>recordText(e,budget)!==e.summaryText),
     ...(previous?{previousSummary:`[${previous.id}, events ${previous.first}-${previous.last}]\n${previous.summary}`}:{})}
   // An already recorded unrepresentable segment remains untrusted. Skip that
   // exact failed coverage for archive work, rather than buying it repeatedly.

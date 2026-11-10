@@ -273,6 +273,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
         const current=store.takeover()
         if(!current.enabled)return {use:false,reason:'compaction takeover is off'}
         if(current.ratio!=null&&!(input.window>0))return {use:false,reason:'current model capacity unavailable'}
+        store.recertifyClaudeNodes(target)
         const context=verifiedCompactionInput(store,target,input.messages||[])
         // Sizes are planned against where Claude Code compacts. An automatic compaction starts there, so the context
         // now bounds it whatever the settings say: a packet planned for a larger window would compact again at once.

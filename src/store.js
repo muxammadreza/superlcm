@@ -26,6 +26,7 @@ const hash = value => createHash('sha256').update(value).digest('hex')
 export const maxFile = 4 * 1024 * 1024 * 1024 // read in 64 KiB pieces, so the size costs disk (the private copy), not memory
 export const maxRecord = 32 * 1024 * 1024 // Codex compacted records can contain an entire replacement history.
 // Preserve the existing index path; both Claude and Codex must point at the same home.
+const CLAUDE_RECERT_VERSION = 1
 export const home = () => resolve(process.env.SUPERLCM_HOME || process.env.SUPERLCM_CLAUDE_HOME || join(homedir(), '.superlcm-claude'))
 const ensurePrivate=privateDirectory
 function inside(parent, child) { const rel = relative(parent, child); return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) }
@@ -1000,6 +1001,45 @@ export class ClaudeStore {
     return done(true)
   }
   node(session, id) { return this.db.prepare('SELECT * FROM nodes WHERE session=? AND id=?').get(session, id) }
+  // Fork: summaries written before source-quality tracking (fork 0.6.3 and earlier), or marked incomplete by a
+  // rule that did not know current Claude Code bookkeeping records, are checked once per session against the
+  // archive with today's rule, the same checks addNode makes, so usable summaries authorize takeover again
+  // without being bought twice. A summary that fails (mechanically shortened, non-contiguous source, content
+  // the text projection does not carry, children that do not cover it) stays navigation-only.
+  recertifyClaudeNodes(session) {
+    if(this.db.prepare('SELECT harness FROM session_origins WHERE session=?').get(session)?.harness!=='claude-code')return 0
+    this.db.exec('CREATE TABLE IF NOT EXISTS claude_node_recert(session TEXT PRIMARY KEY,version INTEGER NOT NULL,at_ms INTEGER NOT NULL)')
+    if(this.db.prepare('SELECT version FROM claude_node_recert WHERE session=?').get(session)?.version>=CLAUDE_RECERT_VERSION)return 0
+    const own=!this.db.isTransaction
+    if(own)this.db.exec('BEGIN IMMEDIATE')
+    let certified=0
+    try{
+      const kind=this.source(session)?.kind
+      const rows=this.db.prepare("SELECT n.* FROM nodes n LEFT JOIN summary_node_quality q ON q.session=n.session AND q.id=n.id WHERE n.session=? AND n.id NOT LIKE 'dsh-native-%' AND n.id NOT LIKE 'claude-rescue-%' AND (q.complete IS NULL OR q.complete<>1) ORDER BY n.level,n.first").all(session)
+      for(const node of rows){
+        if(isReducedSummary(node.summary)||!Number.isSafeInteger(node.first)||!Number.isSafeInteger(node.last)||node.first<0||node.last<node.first)continue
+        let ids;try{ids=JSON.parse(node.children)}catch{continue}
+        if(node.level===0){
+          if(ids.length)continue
+          const events=this.db.prepare('SELECT ordinal FROM events WHERE session=? AND ordinal BETWEEN ? AND ? ORDER BY ordinal').all(session,node.first,node.last)
+          if(events.length!==node.last-node.first+1)continue
+          let ok=true
+          for(const e of events){let raw;try{raw=this.exact(session,e.ordinal)}catch{ok=false;break};if(hasUnrepresentedContent(raw,kind,{strictRecords:true,allowImages:true})){ok=false;break}}
+          if(!ok)continue
+        }else{
+          const children=ids.map(id=>this.node(session,id))
+          if(!children.length||children.some(child=>!child||this.nodeSourceIncomplete(session,child))||!coversSummaryRange(children,node.first,node.last))continue
+        }
+        this.db.prepare('INSERT INTO summary_node_quality VALUES(?,?,1) ON CONFLICT(session,id) DO UPDATE SET complete=1').run(session,node.id)
+        this.db.prepare('INSERT OR IGNORE INTO claude_node_coverage_v3 VALUES(?,?)').run(session,node.id)
+        this.db.prepare('INSERT OR IGNORE INTO claude_node_coverage_v4 VALUES(?,?)').run(session,node.id)
+        certified++
+      }
+      this.db.prepare('INSERT INTO claude_node_recert VALUES(?,?,?) ON CONFLICT(session) DO UPDATE SET version=excluded.version,at_ms=excluded.at_ms').run(session,CLAUDE_RECERT_VERSION,Date.now())
+      if(own)this.db.exec('COMMIT')
+    }catch(error){if(own&&this.db.isTransaction)this.db.exec('ROLLBACK');throw error}
+    return certified
+  }
   addNode(node, { leaseOwner,validate } = {}) {
     this.db.exec('BEGIN IMMEDIATE')
     try {
@@ -1017,7 +1057,7 @@ export class ClaudeStore {
       if(inserted.changes){
         const children=claude&&node.level>0&&!node.id.startsWith('claude-rescue-')?node.children.map(id=>this.node(node.session,id)):[]
         const rows=claude&&node.level===0?this.db.prepare('SELECT ordinal FROM events WHERE session=? AND ordinal BETWEEN ? AND ? ORDER BY ordinal').all(node.session,node.first,node.last):[]
-        const unrepresented=claude&&node.level===0&&(!Number.isSafeInteger(node.first)||!Number.isSafeInteger(node.last)||node.first<0||node.last<node.first||rows.length!==node.last-node.first+1||rows.some(row=>hasUnrepresentedContent(this.exact(node.session,row.ordinal),this.source(node.session).kind,{strictRecords:true})))
+        const unrepresented=claude&&node.level===0&&(!Number.isSafeInteger(node.first)||!Number.isSafeInteger(node.last)||node.first<0||node.last<node.first||rows.length!==node.last-node.first+1||rows.some(row=>hasUnrepresentedContent(this.exact(node.session,row.ordinal),this.source(node.session).kind,{strictRecords:true,allowImages:true})))
         const complete=node.sourceComplete!==false&&!unrepresented&&!children.some(child=>this.nodeSourceIncomplete(node.session,child))
         this.db.prepare('INSERT INTO summary_node_quality VALUES(?,?,?) ON CONFLICT(session,id) DO UPDATE SET complete=excluded.complete').run(node.session,node.id,complete?1:0)
         if(claude)
