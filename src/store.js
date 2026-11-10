@@ -26,7 +26,9 @@ const hash = value => createHash('sha256').update(value).digest('hex')
 export const maxFile = 4 * 1024 * 1024 * 1024 // read in 64 KiB pieces, so the size costs disk (the private copy), not memory
 export const maxRecord = 32 * 1024 * 1024 // Codex compacted records can contain an entire replacement history.
 // Preserve the existing index path; both Claude and Codex must point at the same home.
-const CLAUDE_RECERT_VERSION = 1
+const CLAUDE_RECERT_VERSION = 2
+// Summaries written before fork 0.6.6 never saw a prompt typed during a turn; such a piece is written again.
+const QUEUED_PROMPT = /"type":"queued_command"[^}]*"commandMode":"prompt"|"commandMode":"prompt"[^}]*"type":"queued_command"/
 export const home = () => resolve(process.env.SUPERLCM_HOME || process.env.SUPERLCM_CLAUDE_HOME || join(homedir(), '.superlcm-claude'))
 const ensurePrivate=privateDirectory
 function inside(parent, child) { const rel = relative(parent, child); return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) }
@@ -1024,7 +1026,7 @@ export class ClaudeStore {
           const events=this.db.prepare('SELECT ordinal FROM events WHERE session=? AND ordinal BETWEEN ? AND ? ORDER BY ordinal').all(session,node.first,node.last)
           if(events.length!==node.last-node.first+1)continue
           let ok=true
-          for(const e of events){let raw;try{raw=this.exact(session,e.ordinal)}catch{ok=false;break};if(hasUnrepresentedContent(raw,kind,{strictRecords:true,allowImages:true})){ok=false;break}}
+          for(const e of events){let raw;try{raw=this.exact(session,e.ordinal)}catch{ok=false;break};if(hasUnrepresentedContent(raw,kind,{strictRecords:true,allowImages:true})||QUEUED_PROMPT.test(raw)){ok=false;break}}
           if(!ok)continue
         }else{
           const children=ids.map(id=>this.node(session,id))

@@ -1,5 +1,9 @@
 # Changelog
 
+## Fork 0.6.7 — 2026-11-09
+
+- Finish the 0.6.6 fix on the real store, where a list of known Claude Code attachments still left 1,479 summaries blocked (`total_tokens_reminder` alone 1,270). Attachments no longer block coverage: they are what Claude Code injects and rebuilds. A prompt typed during a turn (`queued_command`, mode `prompt`) is now part of the summary source as user text; older summaries that never saw one are written again. Claude Code's raw `toolUseResult` copy (WebSearch hits, an edited file's original) is no longer checked, since the model reads the `tool_result`, which is. `away_summary` notes do not block. Older summaries are checked again with this rule; 3 still blocked on the recorded store (server-side web search blocks).
+
 ## Fork 0.6.6 — 2026-11-09
 
 - Fix every Claude Code compaction going native after the upstream merge (`incomplete-source summaries are navigation only`). Upstream's new source-completeness rule marked every Claude summary incomplete: it only knew older record types, so current Claude Code bookkeeping records (`bridge-session`, `relocated`, `agent-name`, `atis-latch`, `tools-used`, `mode`, `frame-link`, ...), harness attachments (hook output, listings, reminders, date, environment) and ToolSearch `tool_reference` results all counted as unrepresented content; and a long record shortened in the summary prompt (head, tail and an `lcm_read` pointer, as before) marked the piece reduced, cut it to 5,500 characters and kept it out of coverage for good. In 97 leaves written since the merge, none was usable. Now records with no dialogue fields, known Claude Code attachments, compaction and informational system notes and tool references do not block, and a shortened long record does not reduce a Claude summary. Unknown attachment kinds with content, queued prompts typed mid-turn and unknown records with `message`/`content` still block; an image does not block coverage.

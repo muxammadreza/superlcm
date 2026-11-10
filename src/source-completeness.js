@@ -56,12 +56,7 @@ function visit(value){
 // file-history-delta, mode, frame-link, ...) and new kinds appear with every release. A record with neither a
 // `message` nor `content` is not dialogue. Attachments are what the harness injects (hook output, listings,
 // reminders, date, environment) and are rebuilt by it, not part of the conversation a summary must cover.
-// What Claude Code injects and rebuilds itself (hook output, listings, reminders, environment, date, re-read files).
-const claudeAttachments=new Set(['hook_success','hook_additional_context','hook_system_message','environment','model','date','auto_mode','plan_mode',
-  'instructions','session_context','credential_org','remote_session_change','prompt_snapshot','silent_turn_reminder','thinking_drop',
-  'deferred_tools_delta','deferred_tools_record','agent_listing_delta','mcp_instructions_delta','skill_listing','command_permissions',
-  'queued_command','edited_text_file','file','compact_file_reference','read_truncation_notice'])
-const claudeSystemNotes=new Set(['compact_boundary','informational','local_command','turn_duration','api_error','stop_hook_summary'])
+const claudeSystemNotes=new Set(['away_summary','compact_boundary','informational','local_command','turn_duration','api_error','stop_hook_summary'])
 // allowImages: for deciding whether a summary may authorize a cut, an image the summary did not see does not
 // make the rest of the conversation unsummarizable (the packet keeps its original addressable by lcm_read).
 export function hasUnrepresentedContent(raw,kind='jsonl',{strictRecords=false,allowImages=false}={}){
@@ -70,12 +65,12 @@ export function hasUnrepresentedContent(raw,kind='jsonl',{strictRecords=false,al
   if(!value||typeof value!=='object'||Array.isArray(value))return true
   if(strictRecords&&!value.dsh_session&&typeof value.type==='string'&&!recordTypes.has(value.type)&&!/^api-request(?:-|$)/.test(value.type)){
     if(value.type==='attachment'){
-      const kind=value.attachment?.type
-      // A queued prompt the person typed mid-turn is dialogue the projection does not carry.
-      if(kind==='queued_command'&&value.attachment.commandMode==='prompt')return true
-      if(claudeAttachments.has(kind))return false
-      // An empty attachment marker carries no content; an unknown kind may hold context nothing represents.
-      return Object.keys(value).some(key=>!['type','uuid','parentUuid','timestamp','sessionId','version'].includes(key))
+      // Attachments are what Claude Code injects and rebuilds itself (hook output, listings, reminders, token
+      // counts, environment, date, re-read files); new kinds appear with every release. The one that is
+      // dialogue, a prompt typed during a turn, is projected as user text and must be fully representable.
+      const a=value.attachment
+      if(a?.type==='queued_command'&&a.commandMode==='prompt')return typeof a.prompt==='string'?false:allowImages?textContentIncomplete(a.prompt):contentIncomplete(a.prompt)
+      return false
     }
     // Any unknown payload with dialogue fields may hold information the textual projection does not represent.
     if('message' in value||'content' in value)return true
@@ -84,5 +79,8 @@ export function hasUnrepresentedContent(raw,kind='jsonl',{strictRecords=false,al
   // Request copies are skipped by summaries and never replayed as dialogue.
   if(strictRecords&&/^api-request(?:-|$)/.test(value.type||''))return false
   if(strictRecords&&value.type==='system'&&(value.content!=null||value.message?.content!=null)&&!claudeSystemNotes.has(value.subtype))return true
+  // toolUseResult is Claude Code's raw copy of a tool's output (search hits, an edited file's original); the
+  // model reads the tool_result in message.content, which is checked.
+  if(strictRecords&&value.toolUseResult!==undefined){const {toolUseResult,...rest}=value;value=rest}
   return allowImages?visitText(value):visit(value)
 }

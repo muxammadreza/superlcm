@@ -15,7 +15,7 @@ function fixture(t,{hidden=false}={}){
   const root=mkdtempSync(join(tmpdir(),'slcm-fork-coverage-')),file=join(root,'history.jsonl'),s=new ClaudeStore(join(root,'store'));t.after(()=>s.close())
   const rows=[
     {type:'user',message:{role:'user',content:'Synthetic request'}},
-    ...(hidden?[{type:'attachment',attachment:{type:'future_text_context',content:'SYNTHETIC_HIDDEN_CONSTRAINT'}}]:[]),
+    ...(hidden?[{type:'future_record',content:'SYNTHETIC_HIDDEN_CONSTRAINT'}]:[]),
     {type:'bridge-session',sessionId:'x'},{type:'agent-name',name:'synthetic'},{type:'atis-latch',state:1},
     {type:'attachment',attachment:{type:'hook_additional_context',content:['synthetic hook note']}},
     {type:'attachment',attachment:{type:'deferred_tools_delta',added:['Synthetic']}},
@@ -27,6 +27,16 @@ function fixture(t,{hidden=false}={}){
   s.setMetadata('s',{harness:'claude-code',externalId:'synthetic'})
   return s
 }
+test('a prompt typed during a turn is part of the summary source',t=>{
+  const root=mkdtempSync(join(tmpdir(),'slcm-fork-queued-')),file=join(root,'history.jsonl'),s=new ClaudeStore(join(root,'store'));t.after(()=>s.close())
+  const rows=[{type:'user',message:{role:'user',content:'Synthetic request'}},
+    {type:'attachment',attachment:{type:'queued_command',commandMode:'prompt',prompt:'SYNTHETIC_MIDTURN_CONSTRAINT'}},
+    {type:'attachment',attachment:{type:'total_tokens_reminder',tokens:1}},
+    ...Array.from({length:12},(_,i)=>({type:i%2?'user':'assistant',message:{role:i%2?'user':'assistant',content:'Synthetic '+i}}))]
+  writeFileSync(file,rows.map(JSON.stringify).join('\n')+'\n');s.ingest('s',file);s.setMetadata('s',{harness:'claude-code',externalId:'synthetic'})
+  const w=summaryWork(s,'s',{batchSize:6})
+  assert.equal(w.reducedSources,false);assert.match(w.content,/SYNTHETIC_MIDTURN_CONSTRAINT/)
+})
 const save=(s,w)=>s.addNode({session:'s',id:w.batch_id,level:w.level,first:w.first,last:w.last,children:w.children,summary:'# History\nSynthetic summary.',digest:w.digest,model:'synthetic',sourceComplete:!w.reducedSources})
 
 test('Claude Code bookkeeping records and a long tool output do not stop a summary from covering its source',t=>{
@@ -36,7 +46,7 @@ test('Claude Code bookkeeping records and a long tool output do not stop a summa
   assert.ok(coveredThrough(claudeCompactionNodes(s,'s'))>=w.last)
 })
 
-test('an unknown attachment kind with content still blocks coverage',t=>{
+test('an unknown record with content still blocks coverage',t=>{
   const s=fixture(t,{hidden:true}),w=summaryWork(s,'s',{batchSize:8})
   assert.equal(w.reducedSources,true)
 })
