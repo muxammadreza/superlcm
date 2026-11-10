@@ -11,7 +11,8 @@ import { startServer } from './mcp.js'
 import { claudePluginEnabled } from './runtime.js'
 import { startWeb, defaultPort } from './web.js'
 import { spawn } from 'node:child_process'
-import { existsSync, statSync, openSync, readSync, closeSync, readFileSync } from 'node:fs'
+import { existsSync, statSync, openSync, readSync, closeSync, readFileSync, writeFileSync } from 'node:fs'
+import { privateDirectory, privateFile } from './private-path.js'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -23,6 +24,21 @@ import { randomUUID } from 'node:crypto'
 import {claudeCompactionNodes} from './claude-checkpoints.js'
 import {claudeCompactAt} from './takeover.js'
 import {hostDraft,retainHostDraft,hostSavedReceipt} from './claude-host-drafts.js'
+
+// Fork diagnostic: keep the planner's own reason (compaction_history only keeps a mapped code) and, for a declined
+// compaction, the last input the module sent, in the private store, so it can be replayed. Never fails the reply.
+function noteCompactionDetail(store,session,result,input){
+  try{
+    store.db.exec('CREATE TABLE IF NOT EXISTS compaction_details(session TEXT NOT NULL,at_ms INTEGER NOT NULL,use INTEGER NOT NULL,trigger TEXT,reason TEXT,detail TEXT)')
+    store.db.prepare('INSERT INTO compaction_details VALUES(?,?,?,?,?,?)').run(session,Date.now(),result.use?1:0,String(input.trigger||''),String(result.reason||'').slice(0,500),result.verify?JSON.stringify(result.verify).slice(0,8000):null)
+    store.db.prepare('DELETE FROM compaction_details WHERE rowid IN (SELECT rowid FROM compaction_details WHERE session=? ORDER BY at_ms DESC LIMIT -1 OFFSET 20)').run(session)
+    if(!result.use){
+      const dir=join(store.dir,'diagnostics');privateDirectory(dir)
+      const file=join(dir,'compact-input-'+session.replace(/[^\w.-]/g,'_')+'.json');privateFile(file)
+      writeFileSync(file,JSON.stringify(input))
+    }
+  }catch{}
+}
 const [command,...rest]=process.argv.slice(2)
 const homeFlag=rest.indexOf('--home')
 if(homeFlag>=0){if(!rest[homeFlag+1])throw Error('--home requires a path');process.env.SUPERLCM_HOME=rest[homeFlag+1];rest.splice(homeFlag,2)}
@@ -268,7 +284,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
       if(existsSync(src.path)&&store.ingest(session,src.path,'jsonl',{automatic:true}).skipped)throw Error('conversation deleted during capture') // newest turns
       const {planCompaction}=await import('./compaction.js')
       const {verifiedCompactionInput}=await import('./claude-compaction-input.js')
-      const {verifiedActiveMessages,verifiedCompactionCut}=await import('./claude-rescue-source.js')
+      const {verifiedActiveMessages,verifiedCompactionCut,explainActiveMismatch}=await import('./claude-rescue-source.js')
       const plan=(target=session)=>{
         const current=store.takeover()
         if(!current.enabled)return {use:false,reason:'compaction takeover is off'}
@@ -280,9 +296,9 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
         const at=claudeCompactAt(current,input.window||0),window=input.trigger==='auto'&&input.tokens>0?Math.min(at,input.tokens):at
         const result=planCompaction({meta:store.metadata(target),events:context.events,nodes:claudeCompactionNodes(store,target),messages:context.messages,instructions:input.instructions||'',tokens:input.tokens||0,window,keepTokens:current.keep,trigger:input.trigger})
         const active=result.use?verifiedActiveMessages(store,target,input.messages||[],{requireLatest:false}):null
-        return result.use&&!verifiedCompactionCut(active,result)
-          ? {use:false,reason:'the live conversation is not fully verified in the archive; use native compaction'}
-          : result
+        if(!result.use||verifiedCompactionCut(active,result))return result
+        let detail;try{detail=active?{matched:active.length,start:result.start,through:result.through,lastActive:active.at(-1).ordinal,nonTextBeforeCut:active.slice(0,result.start).filter(m=>m.nonText).map(m=>m.ordinal).slice(0,10),beyondThrough:active.slice(0,result.start).filter(m=>m.ordinal>result.through).length}:explainActiveMismatch(store,target,input.messages||[])}catch(error){detail={error:String(error?.message||error).slice(0,200)}}
+        return {use:false,reason:'the live conversation is not fully verified in the archive; use native compaction',after:result.after,verify:detail}
       }
       // A compaction after the cache expired that does not happen leaves no record: nothing compacted natively.
       // Coverage is that of the conversation whose summaries the packet uses (the parent's for stage 'parent').
@@ -290,7 +306,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
       // One after the cache expired or at the end of a turn is SuperLcm's own: it compacts or is skipped, and is never
       // handed to Claude Code. A dry run (the module checking a turn-end compaction first) changes nothing.
       const cold=input.trigger==='cold',quiet=cold||input.trigger==='turn-end',dry=dryRun
-      const note=(result,stage,catchupMs=null)=>dry||quiet&&!result.use?null:store.noteCompaction(session,{...compactionDiagnostic(result,{nodes:store.nodeRows(covered,0),records:store.stats(covered).records,before:input.tokens||0,trigger:input.trigger}),stage:stage||(result.stage==='inline'||result.inline?'inline':'first'),pending:pendingLeaves(store,covered),after:result.after??null,catchupMs})
+      const note=(result,stage,catchupMs=null)=>dry||quiet&&!result.use?null:(noteCompactionDetail(store,session,result,input),store.noteCompaction(session,{...compactionDiagnostic(result,{nodes:store.nodeRows(covered,0),records:store.stats(covered).records,before:input.tokens||0,trigger:input.trigger}),stage:stage||(result.stage==='inline'||result.inline?'inline':'first'),pending:pendingLeaves(store,covered),after:result.after??null,catchupMs}))
       const notePlan=(result,stage,ms=null)=>{
         if(result.initial){note(result.initial,stage||'first',ms);note(result,'inline',ms)}
         else note(result,stage,ms)

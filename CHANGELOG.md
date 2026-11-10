@@ -1,5 +1,9 @@
 # Changelog
 
+## Fork 0.6.8 — 2026-11-10
+
+- Diagnose takeovers declined with the generic `planner_declined`. Upstream's live-conversation check (`verifiedActiveMessages`, which needs every message in context to match one archived record sequence exactly) and three other planner reasons had no code of their own, so the history kept only "safety conditions not met". They now record `unverified_live`, `coverage_gap`, `incomplete_source` and `capacity_unknown`. Each attempt's own reason goes in `compaction_details`, with the first live message that has no archived match (role, counts and the head of its text). A declined attempt's input is saved privately under `diagnostics/` so it can be replayed.
+
 ## Fork 0.6.7 — 2026-11-09
 
 - Finish the 0.6.6 fix on the real store, where a list of known Claude Code attachments still left 1,479 summaries blocked (`total_tokens_reminder` alone 1,270). Attachments no longer block coverage: they are what Claude Code injects and rebuilds. A prompt typed during a turn (`queued_command`, mode `prompt`) is now part of the summary source as user text; older summaries that never saw one are written again. Claude Code's raw `toolUseResult` copy (WebSearch hits, an edited file's original) is no longer checked, since the model reads the `tool_result`, which is. `away_summary` notes do not block. Older summaries are checked again with this rule; 3 still blocked on the recorded store (server-side web search blocks).

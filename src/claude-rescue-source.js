@@ -53,6 +53,27 @@ export function verifiedActiveMessages(store,session,input,{requireLatest=true}=
   const active=archived.slice(candidates[0],candidates[0]+messages.length)
   return active.length&&(!requireLatest||active.at(-1).ordinal===archived.at(-1).ordinal)?active:null
 }
+// Fork diagnostic: why verifiedActiveMessages found no single archived sequence. Returns counts, the first live
+// message without an archived match at the best alignment, and only the head of its text.
+export function explainActiveMismatch(store,session,input) {
+  const messages=input.map(liveMessage)
+  const incomplete=messages.findIndex(m=>!(m.toolUses.every(id=>m.toolBodies.some(b=>b.id===id&&b.kind==='use'&&'name' in b&&'value' in b))&&
+    m.toolResultIds.every(id=>m.toolBodies.some(b=>b.id===id&&b.kind==='result'&&'value' in b))))
+  const describe=(i,why)=>({index:i,why,role:messages[i]?.role,text:String(messages[i]?.text||'').slice(0,160),toolUses:messages[i]?.toolUses.length||0,toolResults:messages[i]?.toolResultIds.length||0})
+  if(incomplete>=0)return {live:messages.length,first:describe(incomplete,'tool bodies missing from the live message')}
+  const archived=archivedMessages(store,session),keys=messages.map(messageKey),byKey=new Map()
+  archived.forEach((m,i)=>{const list=byKey.get(m.key)||[];list.push(i);byKey.set(m.key,list)})
+  const unmatched=keys.map((k,i)=>byKey.has(k)?null:i).filter(i=>i!==null)
+  // Best alignment: the archived start that matches the longest run of live keys.
+  let best={at:-1,run:0}
+  for(const at of new Set((byKey.get(keys[0])||[]).concat(byKey.get(keys.at(-1))?.map(i=>i-keys.length+1)||[]))){
+    let run=0;while(run<keys.length&&archived[at+run]?.key===keys[run])run++
+    if(run>best.run)best={at,run}
+  }
+  return {live:messages.length,archived:archived.length,unmatchedCount:unmatched.length,unmatchedRoles:[...new Set(unmatched.map(i=>messages[i].role))],
+    alignedFrom:best.at,alignedRun:best.run,...(best.run<keys.length?{first:describe(best.run,unmatched.includes(best.run)?'no archived record has this text and tool ids':'text matches but tool bodies or order differ')}:{}),
+    unmatchedSample:unmatched.slice(0,5).map(i=>describe(i,'no archived match'))}
+}
 export function verifiedCompactionCut(active,plan) {
   return !!active?.length&&Number.isSafeInteger(plan.start)&&plan.start>0&&plan.start<active.length&&
     Number.isSafeInteger(plan.through)&&plan.through<=active.at(-1).ordinal&&
