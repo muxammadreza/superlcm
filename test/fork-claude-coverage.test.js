@@ -60,3 +60,35 @@ test('a summary written before quality tracking is checked once against the arch
   summaryWork(s,'s',{batchSize:8})
   assert.ok(coveredThrough(claudeCompactionNodes(s,'s'))>=w.last)
 })
+
+// Live verification: what Claude Code's context holds versus what its transcript wrote.
+import {verifiedActiveMessages} from '../src/claude-rescue-source.js'
+function transcript(t,rows){
+  const root=mkdtempSync(join(tmpdir(),'slcm-fork-live-')),file=join(root,'history.jsonl'),s=new ClaudeStore(join(root,'store'));t.after(()=>s.close())
+  writeFileSync(file,rows.map(JSON.stringify).join('\n')+'\n');s.ingest('s',file);s.setMetadata('s',{harness:'claude-code',externalId:'synthetic'})
+  return s
+}
+const call=(id,uuid,msg='m1')=>({type:'assistant',uuid,message:{id:msg,role:'assistant',content:[{type:'tool_use',id,name:'Bash',input:{command:'echo '+id}}]}})
+const result=(id,uuid)=>({type:'user',uuid,message:{role:'user',content:[{type:'tool_result',tool_use_id:id,content:[{type:'text',text:'out '+id}]}]},toolUseResult:{stdout:'out '+id,stderr:'',interrupted:false}})
+// The module's view: tool results carry the text and, in `result`, the raw toolUseResult.
+const liveCall=id=>({role:'assistant',text:'',toolUses:[{id,name:'Bash',input:{command:'echo '+id}}]})
+const liveResult=id=>({role:'user',text:'',toolResults:[{tool_use_id:id,text:'out '+id,isError:false,result:{stdout:'out '+id,stderr:'',interrupted:false}}]})
+const prompt=(text,uuid)=>({type:'user',uuid,origin:{kind:'human'},message:{role:'user',content:text}})
+
+test('parallel tool calls verify whether the context groups them or not',t=>{
+  const s=transcript(t,[prompt('Synthetic task','u1'),call('a','c1'),result('a','r1'),call('b','c2'),result('b','r2'),{type:'assistant',uuid:'d',message:{id:'m2',role:'assistant',content:[{type:'text',text:'Done'}]}}])
+  const opening={role:'user',text:'Synthetic task'},done={role:'assistant',text:'Done'}
+  assert.ok(verifiedActiveMessages(s,'s',[opening,liveCall('a'),liveCall('b'),liveResult('a'),liveResult('b'),done]))
+  assert.ok(verifiedActiveMessages(s,'s',[opening,liveCall('a'),liveResult('a'),liveCall('b'),liveResult('b'),done]))
+  // A different output is still refused.
+  const changed=liveResult('b');changed.toolResults[0].text='tampered'
+  assert.equal(verifiedActiveMessages(s,'s',[opening,liveCall('a'),liveCall('b'),liveResult('a'),changed,done]),null)
+})
+
+test('after a native compaction the preserved messages verify after the summary',t=>{
+  const s=transcript(t,[prompt('Synthetic task','u1'),call('a','c1'),result('a','r1'),
+    {type:'system',subtype:'compact_boundary',uuid:'b1',compactMetadata:{trigger:'auto',preservedSegment:{headUuid:'c1',tailUuid:'r1',anchorUuid:'sum'}}},
+    {type:'user',uuid:'sum',isCompactSummary:true,message:{role:'user',content:'This session is being continued from a previous conversation. Synthetic summary.'}},
+    prompt('Synthetic next','u2')])
+  assert.ok(verifiedActiveMessages(s,'s',[{role:'user',text:'This session is being continued from a previous conversation. Synthetic summary.'},liveCall('a'),liveResult('a'),{role:'user',text:'Synthetic next'}]))
+})

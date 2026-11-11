@@ -1,5 +1,14 @@
 # Changelog
 
+## Fork 0.6.9 — 2026-11-11
+
+- Fix takeovers declined as `unverified_live` ("the live conversation is not fully verified in the archive"). The diagnostics from 0.6.8 showed three causes in upstream's check, which needs Claude Code's context to match one archived sequence exactly:
+  - A live tool result was compared by Claude Code's raw `toolUseResult` (`{stdout, stderr, interrupted, …}`), but the archive by the `tool_result` content, so a result never matched. Both are now compared by what the model reads: the content or text, with a list of text blocks read as its text.
+  - Parallel tool calls from one response appear in the context grouped (calls, then results) or interleaved, while the transcript always interleaves them. Both sides are now compared in one canonical order within each run of tool calls and results; every message still has to match exactly one record, with its bodies.
+  - After a native compaction that keeps recent messages, the context holds the summary and then the preserved segment, which the transcript stores before the summary. The archive is now read in context order using the boundary's `compactMetadata.preservedSegment`. Before this, a conversation that was compacted natively once could never be verified again.
+  - The `<local-command-caveat>` meta record written before a slash command is not part of the context and is skipped.
+  Replayed against the four inputs saved by 0.6.8 (with the archive as it was at the time), three verify. The fourth is a transcript written while the disk was full, with records that never reached the context, so it is still declined.
+
 ## Fork 0.6.8 — 2026-11-10
 
 - Diagnose takeovers declined with the generic `planner_declined`. Upstream's live-conversation check (`verifiedActiveMessages`, which needs every message in context to match one archived record sequence exactly) and three other planner reasons had no code of their own, so the history kept only "safety conditions not met". They now record `unverified_live`, `coverage_gap`, `incomplete_source` and `capacity_unknown`. Each attempt's own reason goes in `compaction_details`, with the first live message that has no archived match (role, counts and the head of its text). A declined attempt's input is saved privately under `diagnostics/` so it can be replayed.
