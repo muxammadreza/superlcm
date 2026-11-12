@@ -69,6 +69,37 @@ function extract(raw, kind) {
   } catch { return '' }
 }
 function jsonRecord(raw) { try { return JSON.parse(raw.toString('utf8')) } catch { return null } }
+// Raised when the takeover copy rule changes, so archives indexed by the older rule are replayed once.
+const TAKEOVER_COPY_VERSION = 1
+// After a takeover Claude Code writes the packet and then the kept messages again (state.remaining counts them).
+// A packet prepared ahead of time (precompute) is swapped in with the messages written since appended after
+// its kept ones, so `keep` undercounts them (remaining -2): each of those repeats, in order, a message recorded
+// after the packet's `through` and before the compact boundary (state.low..state.high). Anything else is new,
+// even when its text repeats an older record word for word, as /compact and its output do at every compaction.
+// Returns the record's preview and the next state, or null when the state does not change.
+function takeoverCopy(state, record, preview, ordinal, { same, next }) {
+  const remaining = state?.remaining || 0, low = state?.low ?? -1, high = state?.high ?? -1
+  if (record?.type === 'system' && record.subtype === 'compact_boundary') return { preview, state: { remaining: -1, low: -1, high: ordinal } }
+  if (record?.type !== 'user' && record?.type !== 'assistant') return null
+  if (remaining === -1) {
+    // Only the first message after the boundary can be a packet, so the same text pasted into a prompt is
+    // indexed like any other message.
+    const packet = /^user: <superlcm-context [^>]*keep="(\d+)"/.exec(preview)
+    if (!packet) return { preview, state: { remaining: 0, low, high } }
+    const through = /^user: <superlcm-context [^>]*through="(\d+)"/.exec(preview)
+    return { preview: '', state: { remaining: Number(packet[1]) || -2, low: through ? Number(through[1]) : -1, high } }
+  }
+  if (remaining > 0) {
+    const original = preview ? same(low, high, preview) : null
+    return { preview: '', state: { remaining: remaining > 1 ? remaining - 1 : -2, low: original ?? low, high } }
+  }
+  if (remaining === -2 && preview) {
+    const expected = next(low, high)
+    if (expected && expected.preview === preview) return { preview: '', state: { remaining: -2, low: expected.ordinal, high } }
+    return { preview, state: { remaining: 0, low, high } }
+  }
+  return null
+}
 function derivedName(preview) { return typeof preview==='string' ? preview.replace(/^(user|assistant):\s*/,'').replace(/\s+/g,' ').trim().slice(0,90) : '' }
 export const shortCode = session => hash(String(session)).slice(0,5)
 function bounded(value, fallback, max) { return Number.isSafeInteger(value) && value > 0 ? Math.min(value, max) : fallback }
@@ -115,6 +146,7 @@ export class ClaudeStore {
       CREATE TABLE IF NOT EXISTS compactions(session TEXT NOT NULL, ordinal INTEGER NOT NULL, PRIMARY KEY(session,ordinal));
       CREATE TABLE IF NOT EXISTS takeover_settings(id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL, window INTEGER NOT NULL, previous TEXT);
       CREATE TABLE IF NOT EXISTS takeover_copies(session TEXT PRIMARY KEY, remaining INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS takeover_copy_repair(session TEXT PRIMARY KEY, version INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS host_writers(session TEXT PRIMARY KEY, until_ms INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS host_forkers(session TEXT PRIMARY KEY, until_ms INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS host_summary_claims(session TEXT PRIMARY KEY,batch_id TEXT NOT NULL,revision TEXT NOT NULL);
@@ -127,6 +159,7 @@ export class ClaudeStore {
     this.db.prepare("INSERT INTO integrations(harness,enabled,revision) VALUES('hermes',0,1) ON CONFLICT(harness) DO UPDATE SET enabled=0,revision=integrations.revision+1 WHERE integrations.enabled<>0").run()
     for(const [column,type] of [['claim_id',"TEXT NOT NULL DEFAULT ''"],['leaf_only','INTEGER NOT NULL DEFAULT 0'],['deadline_ms','INTEGER NOT NULL DEFAULT 0'],['run_id','TEXT']])if(!hostColumns.has(column))this.db.exec(`ALTER TABLE host_summary_claims ADD COLUMN ${column} ${type}`)
     const deliveryColumns=new Set(this.db.prepare('PRAGMA table_info(deliveries)').all().map(c=>c.name))
+    {const names=new Set(this.db.prepare('PRAGMA table_info(takeover_copies)').all().map(c=>c.name));for(const column of ['low','high'])if(!names.has(column))this.db.exec(`ALTER TABLE takeover_copies ADD COLUMN ${column} INTEGER NOT NULL DEFAULT -1`)}
     if(!new Set(this.db.prepare('PRAGMA table_info(leases)').all().map(c=>c.name)).has('owner'))this.db.exec("ALTER TABLE leases ADD COLUMN owner TEXT NOT NULL DEFAULT ''")
     if(!new Set(this.db.prepare('PRAGMA table_info(takeover_settings)').all().map(c=>c.name)).has('keep_tokens'))this.db.exec('ALTER TABLE takeover_settings ADD COLUMN keep_tokens INTEGER NOT NULL DEFAULT 40000')
     if(!new Set(this.db.prepare('PRAGMA table_info(takeover_settings)').all().map(c=>c.name)).has('compression_ratio'))this.db.exec('ALTER TABLE takeover_settings ADD COLUMN compression_ratio REAL')
@@ -841,7 +874,7 @@ export class ClaudeStore {
         // Lifecycle ownership has no summary or original text. Keep it so an
         // interrupted native commit can still close safely after deletion.
       }
-      for (const table of ['event_fts', 'events', 'session_event_counts', 'node_fts', 'nodes', 'summary_node_quality', 'claude_node_coverage_v2', 'claude_node_coverage_v3', 'claude_node_coverage_v4', 'leases', 'summary_retries', 'summary_flush', 'compactions', 'takeover_copies', 'host_writers', 'summary_policies', 'summary_preferences', 'session_origins', 'sources']) this.db.prepare(`DELETE FROM ${table} WHERE session=?`).run(session)
+      for (const table of ['event_fts', 'events', 'session_event_counts', 'node_fts', 'nodes', 'summary_node_quality', 'claude_node_coverage_v2', 'claude_node_coverage_v3', 'claude_node_coverage_v4', 'leases', 'summary_retries', 'summary_flush', 'compactions', 'takeover_copies', 'takeover_copy_repair', 'host_writers', 'summary_policies', 'summary_preferences', 'session_origins', 'sources']) this.db.prepare(`DELETE FROM ${table} WHERE session=?`).run(session)
       this.db.prepare('INSERT INTO deleted_sessions(session,deleted_ms) VALUES(?,?) ON CONFLICT(session) DO UPDATE SET deleted_ms=excluded.deleted_ms').run(session, Date.now())
       const queue=this.db.prepare('INSERT OR IGNORE INTO deleted_session_files(session,path) VALUES(?,?)')
       queue.run(session,this.archivePath(session))
@@ -913,28 +946,78 @@ export class ClaudeStore {
     try {
       // A SuperLcm compaction packet, and the kept messages Claude Code writes again right after it, are
       // already recorded: their bytes stay in the archive, but they are not indexed or summarized twice.
-      // Only the first message after Claude Code's compact_boundary can be a packet (remaining -1 marks
-      // that point), so the same text pasted into a prompt is indexed like any other message.
       const record = kind === 'jsonl' ? jsonRecord(raw) : null
-      const copies = this.db.prepare('SELECT remaining FROM takeover_copies WHERE session=?').get(session)?.remaining || 0
-      const setCopies = n => this.db.prepare('INSERT INTO takeover_copies(session,remaining) VALUES(?,?) ON CONFLICT(session) DO UPDATE SET remaining=excluded.remaining').run(session, n)
-      const message = record?.type === 'user' || record?.type === 'assistant'
-      const packet = copies === -1 && message && /^user: <superlcm-context [^>]*keep="(\d+)"/.exec(preview)
-      if (record?.type === 'system' && record.subtype === 'compact_boundary') setCopies(-1)
-      else if (packet) { preview=''; setCopies(Number(packet[1]) || -2) }
-      else if (copies === -1 && message) setCopies(0)
-      else if (copies > 0 && message) { preview=''; setCopies(copies > 1 ? copies - 1 : -2) }
-      // A packet prepared ahead of time (precompute) is swapped in with the messages written since appended
-      // after its kept ones, so `keep` undercounts them: what still repeats a recent recorded message is a copy too.
-      else if (copies === -2 && message) {
-        if (preview && this.db.prepare('SELECT 1 FROM events WHERE session=? AND ordinal>=? AND preview=? LIMIT 1').get(session, ordinal - 20000, preview)) preview=''
-        else if (preview) setCopies(0)
-      }
+      const state = this.db.prepare('SELECT remaining,low,high FROM takeover_copies WHERE session=?').get(session)
+      const next = takeoverCopy(state, record, preview, ordinal, this.#takeoverLookups(session))
+      if (next) { preview = next.preview; this.#saveTakeoverCopies(session, next.state) }
       this.db.prepare('INSERT INTO events VALUES(?,?,?,?,?,?)').run(session, ordinal, start, end, hash(raw), preview)
       this.db.prepare('INSERT INTO event_fts(session,ordinal,preview) VALUES(?,?,?)').run(session, ordinal, preview)
       this.db.prepare("UPDATE sources SET offset=?,status=CASE WHEN status='summary_error' THEN status ELSE 'ok' END,updated_ms=? WHERE session=?").run(end, Date.now(), session)
       this.db.exec('RELEASE archive_event')
     } catch (e) { this.db.exec('ROLLBACK TO archive_event'); this.db.exec('RELEASE archive_event'); throw e }
+  }
+  #takeoverLookups(session) {
+    // The caveat Claude Code writes before a local command is never sent to the model, so it is not copied.
+    const visible = "(preview GLOB 'user: *' OR preview GLOB 'assistant: *') AND preview NOT GLOB 'user: <local-command-caveat>*'"
+    return {
+      same: (low, high, preview) => this.db.prepare('SELECT ordinal FROM events WHERE session=? AND ordinal>? AND ordinal<? AND preview=? ORDER BY ordinal LIMIT 1').get(session, low, high, preview)?.ordinal ?? null,
+      next: (low, high) => this.db.prepare(`SELECT ordinal,preview FROM events WHERE session=? AND ordinal>? AND ordinal<? AND ${visible} ORDER BY ordinal LIMIT 1`).get(session, low, high) || null,
+    }
+  }
+  #saveTakeoverCopies(session, { remaining, low, high }) {
+    this.db.prepare('INSERT INTO takeover_copies(session,remaining,low,high) VALUES(?,?,?,?) ON CONFLICT(session) DO UPDATE SET remaining=excluded.remaining,low=excluded.low,high=excluded.high').run(session, remaining, low, high)
+  }
+  // Before fork 0.6.10 every message after a takeover's kept copies that repeated any earlier preview was
+  // taken for a copy, so the /compact command, its caveat and its output (word for word the same at every
+  // compaction) lost their previews and the next takeover could not find them in context. Replay the
+  // current rule over the session once and give those records their previews back.
+  repairTakeoverCopies(session) {
+    if (this.source(session)?.kind !== 'jsonl') return 0
+    if (this.db.prepare('SELECT version FROM takeover_copy_repair WHERE session=?').get(session)?.version >= TAKEOVER_COPY_VERSION) return 0
+    const mark = () => this.db.prepare('INSERT INTO takeover_copy_repair(session,version) VALUES(?,?) ON CONFLICT(session) DO UPDATE SET version=excluded.version').run(session, TAKEOVER_COPY_VERSION)
+    if (!this.db.prepare('SELECT 1 FROM takeover_copies WHERE session=?').get(session)) { mark(); return 0 }
+    const rows = this.db.prepare('SELECT ordinal,start,end,digest,preview FROM events WHERE session=? ORDER BY ordinal').all(session)
+    const restored = []
+    let state = null, ok = true
+    const copies = this.#originals(session)
+    const fds = copies.map(path => { try { return openSync(path, 'r') } catch { return null } }).filter(fd => fd !== null)
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const lookups = this.#takeoverLookups(session)
+      for (const row of rows) {
+        // An indexed message needs no bytes: its preview names its role. Only blank records are read.
+        let raw = null, record = null
+        const role = /^(user|assistant): /.exec(row.preview)?.[1]
+        if (role) record = { type: role }
+        else if (!row.preview) {
+          for (const fd of fds) { const got = this.#readRange(fd, row.start, row.end, fstatSync(fd).size); if (got?.digest === row.digest) { raw = got.raw; break } }
+          if (!raw) { ok = false; break }
+          record = jsonRecord(raw)
+        }
+        const preview = row.preview || (raw ? extract(raw, 'jsonl') : '')
+        const next = takeoverCopy(state, record, preview, row.ordinal, lookups)
+        if (next) state = next.state
+        const indexed = next ? next.preview : preview
+        if (!row.preview && indexed) {
+          this.db.prepare('UPDATE events SET preview=? WHERE session=? AND ordinal=?').run(indexed, session, row.ordinal)
+          restored.push([row.ordinal, indexed])
+        }
+      }
+      if (ok && restored.length) {
+        const fts = new Map(this.db.prepare('SELECT rowid,ordinal FROM event_fts WHERE session=?').all(session).map(r => [Number(r.ordinal), r.rowid]))
+        for (const [ordinal, preview] of restored) {
+          if (fts.has(ordinal)) this.db.prepare('DELETE FROM event_fts WHERE rowid=?').run(fts.get(ordinal))
+          this.db.prepare('INSERT INTO event_fts(session,ordinal,preview) VALUES(?,?,?)').run(session, ordinal, preview)
+        }
+      }
+      if (ok) {
+        if (state) this.#saveTakeoverCopies(session, state)
+        mark()
+        this.db.exec('COMMIT')
+      } else this.db.exec('ROLLBACK')
+    } catch (e) { this.db.exec('ROLLBACK'); throw e }
+    finally { for (const fd of fds) closeSync(fd) }
+    return ok ? restored.length : 0
   }
   #readRange(fd, start, end, size) {
     if (end > size || end < start) return null

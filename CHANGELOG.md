@@ -1,5 +1,13 @@
 # Changelog
 
+## Fork 0.6.10 — 2026-11-11
+
+- Fix takeovers declined as `unplaced_boundary` ("could not place the summaries in the live conversation"), which after the first takeover in a conversation declined most later ones. There were two causes, both hidden before the upstream merge by the old inline fallback, which carried recent previews and placed the cut at the end. Upstream now carries only verified complete originals, so they surfaced.
+  - The archive's precompute-copy rule (since 0.4.17) took any message after a takeover's kept copies that repeated an earlier preview anywhere in the last 20,000 records for a copy. The `/compact` command, its caveat and its output are word for word the same at every compaction, so they lost their previews and could not be found in context. A copy now has to repeat, in order, a message recorded between the packet's `through` and the compact boundary. Archives indexed by the older rule are replayed once per conversation at its next compaction, and the records that were wrongly blanked get their previews back. On the local store this restored 351 records in 23 conversations.
+  - The `<local-command-caveat>` meta record is never sent to the model, but the planner looked for it in context. It is now skipped there too, as the live verifier already did in 0.6.9.
+- When the summaries end before the oldest message still in context, the decline is now `coverage_lag` instead of `unplaced_boundary`. Catch-up therefore writes the missing pieces and plans again, instead of handing the compaction to Claude Code.
+- A declined turn-end or idle compaction (shown as "Not compacted · SuperLcm: …") now keeps its reason and input in `compaction_details` and `diagnostics/`, like other declines.
+
 ## Fork 0.6.9 — 2026-11-11
 
 - Fix takeovers declined as `unverified_live` ("the live conversation is not fully verified in the archive"). The diagnostics from 0.6.8 showed three causes in upstream's check, which needs Claude Code's context to match one archived sequence exactly:

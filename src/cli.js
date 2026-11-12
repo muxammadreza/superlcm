@@ -289,6 +289,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
         const current=store.takeover()
         if(!current.enabled)return {use:false,reason:'compaction takeover is off'}
         if(current.ratio!=null&&!(input.window>0))return {use:false,reason:'current model capacity unavailable'}
+        store.repairTakeoverCopies(target)
         store.recertifyClaudeNodes(target)
         const context=verifiedCompactionInput(store,target,input.messages||[])
         // Sizes are planned against where Claude Code compacts. An automatic compaction starts there, so the context
@@ -306,7 +307,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
       // One after the cache expired or at the end of a turn is SuperLcm's own: it compacts or is skipped, and is never
       // handed to Claude Code. A dry run (the module checking a turn-end compaction first) changes nothing.
       const cold=input.trigger==='cold',quiet=cold||input.trigger==='turn-end',dry=dryRun
-      const note=(result,stage,catchupMs=null)=>dry||quiet&&!result.use?null:(noteCompactionDetail(store,session,result,input),store.noteCompaction(session,{...compactionDiagnostic(result,{nodes:store.nodeRows(covered,0),records:store.stats(covered).records,before:input.tokens||0,trigger:input.trigger}),stage:stage||(result.stage==='inline'||result.inline?'inline':'first'),pending:pendingLeaves(store,covered),after:result.after??null,catchupMs}))
+      const note=(result,stage,catchupMs=null)=>dry?null:quiet&&!result.use?noteCompactionDetail(store,session,result,input):(noteCompactionDetail(store,session,result,input),store.noteCompaction(session,{...compactionDiagnostic(result,{nodes:store.nodeRows(covered,0),records:store.stats(covered).records,before:input.tokens||0,trigger:input.trigger}),stage:stage||(result.stage==='inline'||result.inline?'inline':'first'),pending:pendingLeaves(store,covered),after:result.after??null,catchupMs}))
       const notePlan=(result,stage,ms=null)=>{
         if(result.initial){note(result.initial,stage||'first',ms);note(result,'inline',ms)}
         else note(result,stage,ms)
